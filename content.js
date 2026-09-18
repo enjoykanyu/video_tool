@@ -3,6 +3,8 @@
 
   let subtitleContainer = null;
   let statusElement = null;
+  let subtitleBody = null;
+  let toolbar = null;
   let subtitles = [];
   let translatedSubtitles = [];
   let videoElement = null;
@@ -10,6 +12,8 @@
   let animationFrameId = null;
   let isProcessing = false;
   let navigationPollId = null;
+  let generation = 0;
+  let dragPosition = null;
 
   const CONFIG = {
     fontSize: 18,
@@ -20,6 +24,7 @@
   const CONTEXT_AFTER = 3;
 
   async function init() {
+    const run = ++generation;
     try {
       const video = await waitForVideo();
       if (!video) {
@@ -42,21 +47,18 @@
         return;
       }
 
-      // Step 1: Extract subtitles from page __INITIAL_STATE__ (most reliable)
       showStatus('正在提取字幕 / Extracting subtitles\u2026', 'loading');
-      let result = await extractSubtitlesFromPage();
-
-      // Step 2: Fallback to background API
+      const page = Number(new URLSearchParams(window.location.search).get('p') || 1);
+      const apiResult = await chrome.runtime.sendMessage({ action: 'fetchSubtitles', bvid, page });
+      let result = apiResult?.success && apiResult.subtitles?.length ? apiResult : null;
       if (!result) {
-        const page = Number(new URLSearchParams(window.location.search).get('p') || 1);
-        const apiResult = await chrome.runtime.sendMessage({ action: 'fetchSubtitles', bvid, page });
-        if (apiResult?.success) {
-          result = apiResult;
-        }
+        try { result = await extractSubtitlesFromPage(); }
+        catch (error) { console.warn('[B站AI字幕] 页面字幕轨道读取失败:', error); }
       }
+      if (run !== generation) return;
 
       if (!result || !Array.isArray(result.subtitles) || !result.subtitles.length) {
-        const hint = result?.hint || '';
+        const hint = result?.hint || apiResult?.hint || apiResult?.error || '';
         showStatus(`\u5f53\u524d\u89c6\u9891\u6ca1\u6709\u53ef\u7528 CC \u5b57\u5e55 / No CC subtitles. ${hint}`, 'error');
         return;
       }
@@ -69,16 +71,19 @@
 
       const lanText = result.lanDoc || result.lan || '';
       showStatus(`\u5df2\u63d0\u53d6 ${subtitles.length} \u6761\u5b57\u5e55\uff08${lanText}\uff09\uff0c\u7ffb\u8bd1\u4e2d / Translating\u2026`, 'loading');
-      translatedSubtitles = [];
-      renderWindow(-1);
-      await requestTranslation(subtitles, result.direction || 'en2zh');
-      hideStatus();
+      translatedSubtitles = subtitles.map(item => ({ ...item, translation: '' }));
+      toolbar.hidden = false;
       bindVideoEvents();
       startSubtitleLoop();
       updateSubtitleForCurrentTime();
+      const translated = await requestTranslation(subtitles, result.direction || 'en2zh', run);
+      if (run !== generation) return;
+      if (translated) hideStatus();
+      currentSubtitleIndex = -2;
+      updateSubtitleForCurrentTime();
     } catch (error) {
       console.error('[B\u7ad9AI\u5b57\u5e55] \u521d\u59cb\u5316\u5931\u8d25:', error);
-      showStatus(`\u63d0\u53d6\u5931\u8d25 / Failed: ${error.message}\uff08\u53ef\u70b9\u51fb\u6269\u5c55\u56fe\u6807\u91cd\u8bd5\uff09`, 'error');
+      if (run === generation) showStatus(`\u63d0\u53d6\u5931\u8d25 / Failed: ${error.message}`, 'error');
     }
   }
 
@@ -215,30 +220,38 @@
     });
   }
 
-  async function requestTranslation(originalSubtitles, direction) {
-    if (isProcessing) return;
+  async function requestTranslation(originalSubtitles, direction, run) {
     isProcessing = true;
 
     try {
-      const fullContext = originalSubtitles.map(item => item.content).join('\n');
-      const result = await chrome.runtime.sendMessage({
-        action: 'translateSubtitles',
-        subtitles: originalSubtitles,
-        fullContext,
-        direction,
-      });
-
-      if (!result?.success || !Array.isArray(result.translations)) {
-        throw new Error(result?.error || '\u7ffb\u8bd1\u5931\u8d25');
+      for (let start = 0; start < originalSubtitles.length; start += 40) {
+        if (run !== generation) return false;
+        const context = originalSubtitles.slice(Math.max(0, start - 40), Math.min(originalSubtitles.length, start + 80))
+          .map(item => item.content).join('\n');
+        const result = await chrome.runtime.sendMessage({
+          action: 'translateSubtitles',
+          subtitles: originalSubtitles.slice(start, start + 40),
+          fullContext: context,
+          direction,
+        });
+        if (run !== generation) return false;
+        if (!result?.success || !Array.isArray(result.translations) || result.translations.length !== Math.min(40, originalSubtitles.length - start)) {
+          throw new Error(result?.error || '\u7ffb\u8bd1\u5931\u8d25');
+        }
+        translatedSubtitles.splice(start, result.translations.length, ...result.translations);
+        currentSubtitleIndex = -2;
+        updateSubtitleForCurrentTime();
+        showStatus(`已翻译 ${Math.min(start + 40, originalSubtitles.length)} / ${originalSubtitles.length} 条`, 'loading');
       }
-      translatedSubtitles = result.translations;
+      return true;
     } catch (error) {
       console.error('[B\u7ad9AI\u5b57\u5e55] \u7ffb\u8bd1\u5931\u8d25:', error);
-      translatedSubtitles = originalSubtitles.map(item => ({ ...item, translation: item.content }));
-      showStatus(`\u7ffb\u8bd1\u5931\u8d25\uff0c\u4ec5\u663e\u793a\u539f\u6587 / Translation failed: ${error.message}`, 'error');
-      setTimeout(hideStatus, 6000);
+      if (run === generation) {
+        showStatus(`\u7ffb\u8bd1\u5931\u8d25\uff0c\u4ec5\u663e\u793a\u539f\u6587 / Translation failed: ${error.message}`, 'error');
+      }
+      return false;
     } finally {
-      isProcessing = false;
+      if (run === generation) isProcessing = false;
     }
   }
 
@@ -249,23 +262,94 @@
     subtitleContainer = document.createElement('div');
     subtitleContainer.id = 'ai-subtitle-container';
     subtitleContainer.className = 'ai-subtitle-hidden';
+    toolbar = document.createElement('div');
+    toolbar.className = 'ai-subtitle-toolbar';
+    toolbar.hidden = true;
+    const handle = document.createElement('span');
+    handle.className = 'ai-subtitle-handle';
+    handle.textContent = '⋮⋮';
+    handle.title = '拖动字幕 / Drag subtitles';
+    toolbar.appendChild(handle);
+    for (const format of ['txt', 'srt']) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = format.toUpperCase() + ' ↓';
+      button.title = `下载 ${format.toUpperCase()} 字幕`;
+      button.addEventListener('click', () => downloadSubtitles(format));
+      toolbar.appendChild(button);
+    }
+    subtitleBody = document.createElement('div');
+    subtitleBody.className = 'ai-subtitle-body';
+    subtitleContainer.append(toolbar, subtitleBody);
+    handle.addEventListener('pointerdown', startDrag);
 
     statusElement = document.createElement('div');
     statusElement.id = 'ai-subtitle-status';
     statusElement.className = 'ai-subtitle-status';
     statusElement.style.display = 'none';
 
-    const player = document.querySelector('.bpx-player-container') || document.body;
-    player.appendChild(statusElement);
-    player.appendChild(subtitleContainer);
+    document.body.append(statusElement, subtitleContainer);
     applySubtitleConfig();
   }
 
   function bindVideoEvents() {
+    videoElement.removeEventListener('play', startSubtitleLoop);
+    videoElement.removeEventListener('pause', pauseSubtitleLoop);
+    videoElement.removeEventListener('seeked', updateSubtitleForCurrentTime);
     videoElement.addEventListener('play', startSubtitleLoop);
     videoElement.addEventListener('pause', pauseSubtitleLoop);
     videoElement.addEventListener('seeked', updateSubtitleForCurrentTime);
-    document.addEventListener('fullscreenchange', applySubtitleConfig);
+    document.removeEventListener('fullscreenchange', attachToVisibleRoot);
+    document.addEventListener('fullscreenchange', attachToVisibleRoot);
+  }
+
+  function attachToVisibleRoot() {
+    const root = document.fullscreenElement || document.body;
+    root.append(statusElement, subtitleContainer);
+    applySubtitleConfig();
+  }
+
+  function startDrag(event) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const rect = subtitleContainer.getBoundingClientRect();
+    const offsetX = event.clientX - rect.left;
+    const offsetY = event.clientY - rect.top;
+    const move = e => {
+      const width = subtitleContainer.offsetWidth;
+      const height = subtitleContainer.offsetHeight;
+      dragPosition = {
+        x: Math.max(0, Math.min(innerWidth - width, e.clientX - offsetX)),
+        y: Math.max(0, Math.min(innerHeight - height, e.clientY - offsetY)),
+      };
+      applySubtitleConfig();
+    };
+    const end = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      if (dragPosition) chrome.storage.local.set({ subtitleCoordinates: dragPosition });
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end, { once: true });
+  }
+
+  function downloadSubtitles(format) {
+    const entries = translatedSubtitles.length ? translatedSubtitles : subtitles;
+    if (!entries.length) return;
+    const timestamp = time => {
+      const ms = Math.round(Math.max(0, Number(time)) * 1000);
+      return `${String(Math.floor(ms / 3600000)).padStart(2, '0')}:${String(Math.floor(ms / 60000) % 60).padStart(2, '0')}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')},${String(ms % 1000).padStart(3, '0')}`;
+    };
+    const text = entries.map((item, index) => {
+      const lines = [item.content, item.translation].filter(Boolean).join('\n');
+      return format === 'srt' ? `${index + 1}\n${timestamp(item.from)} --> ${timestamp(item.to)}\n${lines}` : lines;
+    }).join('\n\n') + '\n';
+    const blobUrl = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = `${window.location.pathname.match(/BV[0-9A-Za-z]+/)?.[0] || 'video'}-bilingual.${format}`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
   }
 
   function startSubtitleLoop() {
@@ -289,7 +373,6 @@
     for (let index = 0; index < list.length; index++) {
       if (list[index].from > time) break;
       if (time <= list[index].to) { active = index; break; }
-      active = index;
     }
     return active;
   }
@@ -314,7 +397,7 @@
 
   function renderWindow(centerIndex) {
     if (!subtitleContainer) return;
-    subtitleContainer.replaceChildren();
+    subtitleBody.replaceChildren();
 
     if (centerIndex < 0 || !translatedSubtitles.length) {
       subtitleContainer.classList.add('ai-subtitle-hidden');
@@ -341,7 +424,7 @@
 
       line.appendChild(original);
       line.appendChild(translation);
-      subtitleContainer.appendChild(line);
+      subtitleBody.appendChild(line);
     }
 
     subtitleContainer.classList.remove('ai-subtitle-hidden');
@@ -349,7 +432,7 @@
 
   function clearSubtitle() {
     if (!subtitleContainer) return;
-    subtitleContainer.replaceChildren();
+    subtitleBody.replaceChildren();
     subtitleContainer.classList.add('ai-subtitle-hidden');
     currentSubtitleIndex = -2;
   }
@@ -357,8 +440,17 @@
   function applySubtitleConfig() {
     if (!subtitleContainer) return;
     subtitleContainer.style.fontSize = `${CONFIG.fontSize}px`;
-    subtitleContainer.classList.toggle('ai-subtitle-top', CONFIG.subtitlePosition === 'top');
-    subtitleContainer.classList.toggle('ai-subtitle-fullscreen', Boolean(document.fullscreenElement));
+    if (dragPosition) {
+      subtitleContainer.style.transform = 'none';
+      subtitleContainer.style.left = `${Math.max(0, Math.min(innerWidth - subtitleContainer.offsetWidth, dragPosition.x))}px`;
+      subtitleContainer.style.top = `${Math.max(0, Math.min(innerHeight - subtitleContainer.offsetHeight, dragPosition.y))}px`;
+      subtitleContainer.style.bottom = 'auto';
+    } else {
+      subtitleContainer.style.transform = 'translateX(-50%)';
+      subtitleContainer.style.left = '50%';
+      subtitleContainer.style.top = CONFIG.subtitlePosition === 'top' ? '58px' : 'auto';
+      subtitleContainer.style.bottom = CONFIG.subtitlePosition === 'top' ? 'auto' : '68px';
+    }
   }
 
   function showStatus(message, type) {
@@ -392,6 +484,7 @@
       if (!/\/(?:video|bangumi)\//.test(window.location.pathname)) return;
 
       pauseSubtitleLoop();
+      generation++;
       subtitles = [];
       translatedSubtitles = [];
       await new Promise(resolve => setTimeout(resolve, 700));
@@ -400,9 +493,10 @@
   }
 
   const loadDisplayConfig = async () => {
-    const result = await chrome.storage.local.get(['fontSize', 'position']);
+    const result = await chrome.storage.local.get(['fontSize', 'position', 'subtitleCoordinates']);
     CONFIG.fontSize = Number(result.fontSize || 18);
     CONFIG.subtitlePosition = result.position || 'bottom';
+    dragPosition = result.subtitleCoordinates || null;
     applySubtitleConfig();
   };
 

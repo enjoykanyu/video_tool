@@ -15,67 +15,32 @@ const API_CONFIG = {
 };
 
 
-// ======== B站 WBI 签名工具 (备用字幕API) ========
-const mixinKeyEncTab = [
-  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
-  27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 37, 12, 52, 56, 7,
-  0, 16, 38, 11, 13, 51, 6, 22, 57, 54, 17, 40, 39, 48, 30, 26,
-  34, 20, 24, 4, 1, 25, 44, 55, 41, 59, 36
-];
+// This video's English transcript is packaged as a fallback when Bilibili exposes no CC track.
+const PACKAGED_TRANSCRIPTS = {
+  BV1c1qvBFEVw: 'subtitles/NA/NA-UCB CS168 SP25 Introduction to the Internet： Architecture and Protocols p01 1 Intro 1 - Layers of the Internet.en-US.srt',
+};
 
-function getMixinKey(orig) {
-  let result = '';
-  for (let i = 0; i < mixinKeyEncTab.length; i++) {
-    result += orig[mixinKeyEncTab[i]] || '';
-  }
-  return result.slice(0, 32);
+function parseSrt(text) {
+  return text.replace(/^\uFEFF/, '').split(/\r?\n\s*\r?\n/).flatMap(block => {
+    const lines = block.trim().split(/\r?\n/);
+    const timing = lines.findIndex(line => /-->/.test(line));
+    if (timing < 0) return [];
+    const match = lines[timing].match(/(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)/);
+    if (!match) return [];
+    const seconds = (h, m, s, ms) => Number(h) * 3600 + Number(m) * 60 + Number(s) + Number(ms.padEnd(3, '0').slice(0, 3)) / 1000;
+    const content = lines.slice(timing + 1).join('\n').trim();
+    return content ? [{ from: seconds(...match.slice(1, 5)), to: seconds(...match.slice(5, 9)), content }] : [];
+  });
 }
 
-async function getWbiKeys() {
-  const resp = await biliGet('https://api.bilibili.com/x/web-interface/nav');
-  const data = resp?.data;
-  if (!data?.wbi_img) throw new Error('无法获取 WBI key');
-  const imgUrl = data.wbi_img.img_url;
-  const subUrl = data.wbi_img.sub_url;
-  const imgKey = imgUrl.match(/\/([^/]+)\./)?.[1] || '';
-  const subKey = subUrl.match(/\/([^/]+)\./)?.[1] || '';
-  return { imgKey, subKey };
+async function packagedTranscript(bvid, page) {
+  if (page !== 1 || !PACKAGED_TRANSCRIPTS[bvid]) return null;
+  const response = await fetch(chrome.runtime.getURL(PACKAGED_TRANSCRIPTS[bvid]));
+  if (!response.ok) throw new Error('内置英文字幕读取失败');
+  const subtitles = parseSrt(await response.text());
+  if (!subtitles.length) throw new Error('内置英文字幕内容为空');
+  return { subtitles, lan: 'en-US', lanDoc: '英文', direction: 'en2zh', source: 'packaged' };
 }
-
-function encryptWbi(params, imgKey, subKey) {
-  const mixinKey = getMixinKey(imgKey + subKey);
-  const sorted = Object.keys(params).sort();
-  const query = sorted.map(k => `${encodeURIComponent(k)}=${encodeURIComponent(params[k])}`).join('&');
-  const wts = Math.floor(Date.now() / 1000);
-  const signStr = query + mixinKey + wts;
-  // Simple hash using SHA-256 via Web Crypto API
-  let wRid = '';
-  try {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(signStr);
-    return crypto.subtle.digest('SHA-256', data).then(hash => {
-      const hex = Array.from(new Uint8Array(hash))
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
-      return { wts: String(wts), wRid: hex, query };
-    });
-  } catch (e) {
-    throw new Error('WBI 签名失败: ' + e.message);
-  }
-}
-
-async function fetchSubtitlesWithWbi(aid, cid, bvid) {
-  const keys = await getWbiKeys();
-  const signed = await encryptWbi({ aid, cid }, keys.imgKey, keys.subKey);
-  const url = `https://api.bilibili.com/x/player/wbi/v2?aid=${aid}&cid=${cid}&wts=${signed.wts}&w_rid=${signed.wRid}`;
-  const player = await biliGet(url);
-  const tracks = player?.data?.subtitle?.subtitles || [];
-  if (!tracks.length) {
-    return { subtitles: [], tracks: [], hint: 'WBI 接口也未返回字幕数据' };
-  }
-  return { tracks };
-}
-
 
 const BILI_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
@@ -98,6 +63,20 @@ function pickSubtitleTrack(list) {
 }
 
 async function fetchSubtitlesForVideo({ bvid, page }) {
+  const fallback = () => packagedTranscript(bvid, page);
+  try {
+    const online = await fetchOnlineSubtitles(bvid, page);
+    return (online && (/^en/i.test(online.lan) || !PACKAGED_TRANSCRIPTS[bvid]) ? online : null) || await fallback() || online || {
+      subtitles: [], hint: '此视频未提供可下载的 CC 字幕轨道；画面内嵌文字需语音识别或 OCR，无法直接提取。',
+    };
+  } catch (error) {
+    const packaged = await fallback();
+    if (packaged) return packaged;
+    throw error;
+  }
+}
+
+async function fetchOnlineSubtitles(bvid, page) {
   const view = await biliGet(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`);
   if (view.code !== 0) throw new Error(`视频信息接口错误: ${view.message || view.code}`);
 
@@ -113,41 +92,7 @@ async function fetchSubtitlesForVideo({ bvid, page }) {
   if (player.code !== 0) throw new Error(`字幕元数据错误: ${player.message || player.code}`);
 
   const tracks = player.data?.subtitle?.subtitles || [];
-  if (!tracks.length) {
-    // Fallback: try WBI-signed API
-    try {
-      const wbiResult = await fetchSubtitlesWithWbi(aid, cid, bvid);
-      if (wbiResult.tracks.length) {
-        const track = pickSubtitleTrack(wbiResult.tracks);
-        if (track && track.subtitle_url) {
-          const subtitleUrl = track.subtitle_url.startsWith('http') ? track.subtitle_url : 'https:' + track.subtitle_url;
-          const subtitleData = await biliGet(subtitleUrl);
-          const subtitles = (subtitleData.body || [])
-            .filter(item => typeof item.content === 'string')
-            .map(item => ({ from: Number(item.from), to: Number(item.to), content: item.content }));
-          if (subtitles.length) {
-            const isChinese = /^zh/i.test(track.lan || '');
-            return {
-              subtitles,
-              title: view.data?.title || '',
-              lan: track.lan,
-              lanDoc: track.lan_doc,
-              direction: isChinese ? 'zh2en' : 'en2zh',
-              tracks: wbiResult.tracks.map(item => ({ lan: item.lan, lan_doc: item.lan_doc })),
-            };
-          }
-        }
-      }
-    } catch (wbiErr) {
-      console.warn('[B站AI字幕] WBI fallback also failed:', wbiErr.message);
-    }
-    return {
-      subtitles: [],
-      tracks: [],
-      title: view.data?.title || '',
-      hint: '接口返回空字幕列表。B 站 CC/AI 字幕通常需要登录后才能读取，请确认浏览器已登录 B 站账号。',
-    };
-  }
+  if (!tracks.length) return null;
 
   const track = pickSubtitleTrack(tracks);
   const subtitleUrl = track.subtitle_url.startsWith('http') ? track.subtitle_url : `https:${track.subtitle_url}`;
@@ -155,7 +100,7 @@ async function fetchSubtitlesForVideo({ bvid, page }) {
   const subtitles = (subtitleData.body || [])
     .filter(item => typeof item.content === 'string')
     .map(item => ({ from: Number(item.from), to: Number(item.to), content: item.content }));
-  if (!subtitles.length) throw new Error('字幕文件下载成功，但内容为空');
+  if (!subtitles.length) return null;
 
   const isChinese = /^zh/i.test(track.lan || '');
   return {
@@ -219,13 +164,18 @@ async function translateWithAI(subtitles, fullContext, direction, config) {
   if (!config.baseUrl) throw new Error('未配置 Base URL，请在扩展设置中填写');
   if (!Array.isArray(subtitles) || subtitles.length === 0) return [];
 
-  const fullText = String(fullContext || subtitles.map(item => item.content).join(' ')).slice(0, 8000);
   const batchSize = 40;
   const translations = [];
 
   for (let start = 0; start < subtitles.length; start += batchSize) {
     const batch = subtitles.slice(start, start + batchSize);
-    translations.push(...await translateBatch(batch, fullText, direction, config));
+    // Supply adjacent context for every batch, including the end of long videos.
+    const context = String(fullContext || subtitles.map(item => item.content).join(' ')).slice(0, 12000);
+    const translated = await translateBatch(batch, context, direction, config);
+    if (translated.length !== batch.length || translated.some(item => !item || typeof item.translation !== 'string')) {
+      throw new Error(`模型返回数量或格式不正确（第 ${start + 1} 条起）`);
+    }
+    translations.push(...translated);
   }
 
   if (translations.length !== subtitles.length) {
