@@ -1,515 +1,301 @@
-(function() {
+(function () {
   'use strict';
 
-  let subtitleContainer = null;
-  let statusElement = null;
-  let subtitleBody = null;
-  let toolbar = null;
-  let subtitles = [];
-  let translatedSubtitles = [];
-  let videoElement = null;
-  let currentSubtitleIndex = -2;
-  let animationFrameId = null;
-  let isProcessing = false;
-  let navigationPollId = null;
-  let generation = 0;
-  let dragPosition = null;
-
-  const CONFIG = {
-    fontSize: 18,
-    subtitlePosition: 'bottom',
+  const CACHE_PREFIX = 'subtitleCache:';
+  const CONTEXT_RADIUS = 1;
+  const state = {
+    bvid: '', page: 1, cacheBase: '', video: null, subtitles: [], generation: 0,
+    currentIndex: -2, frame: 0, panel: null, body: null, status: null, chooser: null,
+    recordSelect: null, fileInput: null, dragPosition: null, size: null, resourceUrls: [],
   };
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  const button = (text, title, onClick, className = '') => {
+    const node = el('button', className, text);
+    node.type = 'button'; node.title = title; node.addEventListener('click', onClick);
+    return node;
+  };
+  const rememberResource = url => {
+    if (!/(?:ai[_-]?subtitle|subtitle|caption|\/bfs\/)/i.test(url || '')) return;
+    state.resourceUrls = [url, ...state.resourceUrls.filter(item => item !== url)].slice(0, 80);
+  };
+  performance.getEntriesByType('resource').forEach(entry => rememberResource(entry.name));
+  try {
+    new PerformanceObserver(list => list.getEntries().forEach(entry => rememberResource(entry.name))).observe({ type: 'resource', buffered: true });
+  } catch (_) {}
 
-  const CONTEXT_BEFORE = 2;
-  const CONTEXT_AFTER = 3;
+  function videoIdentity() {
+    const bvid = location.pathname.match(/\/video\/(BV[0-9A-Za-z]+)/)?.[1] || '';
+    const page = Math.max(1, Number(new URLSearchParams(location.search).get('p') || 1));
+    return { bvid, page, key: `${CACHE_PREFIX}${bvid}:p${page}:` };
+  }
 
   async function init() {
-    const run = ++generation;
-    try {
-      const video = await waitForVideo();
-      if (!video) {
-        showStatus('未找到播放器 / No video element found', 'error');
-        return;
-      }
-
-      if (videoElement && videoElement !== video && animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-        animationFrameId = null;
-      }
-
-      videoElement = video;
-      createSubtitleContainer();
-      clearSubtitle();
-
-      const bvid = window.location.pathname.match(/\/video\/(BV[0-9A-Za-z]+)/)?.[1];
-      if (!bvid) {
-        showStatus('无法从地址解析视频 BV 号 / Cannot parse BV id', 'error');
-        return;
-      }
-
-      showStatus('正在提取字幕 / Extracting subtitles\u2026', 'loading');
-      const page = Number(new URLSearchParams(window.location.search).get('p') || 1);
-      const apiResult = await chrome.runtime.sendMessage({ action: 'fetchSubtitles', bvid, page });
-      let result = apiResult?.success && apiResult.subtitles?.length ? apiResult : null;
-      if (!result) {
-        try { result = await extractSubtitlesFromPage(); }
-        catch (error) { console.warn('[B站AI字幕] 页面字幕轨道读取失败:', error); }
-      }
-      if (run !== generation) return;
-
-      if (!result || !Array.isArray(result.subtitles) || !result.subtitles.length) {
-        const hint = result?.hint || apiResult?.hint || apiResult?.error || '';
-        showStatus(`\u5f53\u524d\u89c6\u9891\u6ca1\u6709\u53ef\u7528 CC \u5b57\u5e55 / No CC subtitles. ${hint}`, 'error');
-        return;
-      }
-
-      subtitles = result.subtitles;
-      if (!subtitles.length) {
-        showStatus('\u5f53\u524d\u89c6\u9891\u6ca1\u6709\u53ef\u7528 CC \u5b57\u5e55 / No CC subtitles', 'error');
-        return;
-      }
-
-      const lanText = result.lanDoc || result.lan || '';
-      showStatus(`\u5df2\u63d0\u53d6 ${subtitles.length} \u6761\u5b57\u5e55\uff08${lanText}\uff09\uff0c\u7ffb\u8bd1\u4e2d / Translating\u2026`, 'loading');
-      translatedSubtitles = subtitles.map(item => ({ ...item, translation: '' }));
-      toolbar.hidden = false;
-      bindVideoEvents();
-      startSubtitleLoop();
-      updateSubtitleForCurrentTime();
-      const translated = await requestTranslation(subtitles, result.direction || 'en2zh', run);
-      if (run !== generation) return;
-      if (translated) hideStatus();
-      currentSubtitleIndex = -2;
-      updateSubtitleForCurrentTime();
-    } catch (error) {
-      console.error('[B\u7ad9AI\u5b57\u5e55] \u521d\u59cb\u5316\u5931\u8d25:', error);
-      if (run === generation) showStatus(`\u63d0\u53d6\u5931\u8d25 / Failed: ${error.message}`, 'error');
-    }
-  }
-
-  /**
-   * Extract __INITIAL_STATE__ from Bilibili page HTML
-   */
-  function parseInitialState() {
-    try {
-      const scripts = document.querySelectorAll('script');
-      for (const script of scripts) {
-        const text = script.textContent || '';
-        const match = text.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});\s*</);
-        if (match) {
-          try {
-            return JSON.parse(match[1]);
-          } catch (e) {
-            // Try looser match
-            const loose = text.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]+?\});?\s*(?:\/\/|window|var|const|let|$)/);
-            if (loose) {
-              try { return JSON.parse(loose[1]); } catch (e2) {}
-            }
-          }
-        }
-      }
-      // Try fetching from page source as fallback
-      const html = document.documentElement.innerHTML;
-      const htmlMatch = html.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]+?\});?\s*(?:<\/script>|window|var|const|let|$)/);
-      if (htmlMatch) {
-        try {
-          return JSON.parse(htmlMatch[1]);
-        } catch (e) {}
-      }
-    } catch (e) {
-      console.warn('[B\u7ad9AI\u5b57\u5e55] \u89e3\u6790 __INITIAL_STATE__ \u5931\u8d25:', e);
-    }
-    return null;
-  }
-
-  /**
-   * Extract subtitle data directly from page __INITIAL_STATE__
-   */
-  async function extractSubtitlesFromPage() {
-    const state = parseInitialState();
-    if (!state) return null;
-
-    // Helper to find subtitles array in any nested structure
-    const findSubtitles = (obj) => {
-      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
-      try {
-        if (Array.isArray(obj.subtitles) && obj.subtitles.length > 0 &&
-            obj.subtitles[0] && obj.subtitles[0].subtitle_url) {
-          return obj.subtitles;
-        }
-      } catch (e) {}
-      // Check videoData.subtitle.subtitles
-      if (obj.videoData && obj.videoData.subtitle) {
-        try {
-          if (Array.isArray(obj.videoData.subtitle.subtitles) &&
-              obj.videoData.subtitle.subtitles.length > 0) {
-            return obj.videoData.subtitle.subtitles;
-          }
-        } catch (e) {}
-      }
-      return null;
-    };
-
-    let subtitlesList = findSubtitles(state);
-    if (!subtitlesList) subtitlesList = findSubtitles({ videoData: state });
-    if (!subtitlesList) subtitlesList = findSubtitles({ videoData: { subtitle: state } });
-    // Try initState for SPA-loaded pages
-    if (!subtitlesList && state.initState) {
-      subtitlesList = findSubtitles(state.initState) ||
-        findSubtitles({ videoData: state.initState }) ||
-        findSubtitles({ videoData: { subtitle: state.initState } });
-    }
-
-    if (!subtitlesList || !subtitlesList.length) return null;
-
-    // Pick best track: en > zh-CN > zh-Hans > ai-zh > first
-    const track =
-      subtitlesList.find(item => /^en$/i.test(item.lan || '')) ||
-      subtitlesList.find(item => item.lan === 'zh-CN') ||
-      subtitlesList.find(item => item.lan === 'zh-Hans') ||
-      subtitlesList.find(item => /^ai-/i.test(item.lan)) ||
-      subtitlesList[0];
-
-    if (!track || !track.subtitle_url) return null;
-
-    // Fetch subtitle JSON
-    const subtitleUrl = track.subtitle_url.startsWith('http')
-      ? track.subtitle_url
-      : `https:${track.subtitle_url}`;
-    const resp = await fetch(subtitleUrl, { credentials: 'include' });
-    if (!resp.ok) {
-      console.warn('[B\u7ad9AI\u5b57\u5e55] \u5b57\u5e55\u6587\u4ef6\u8bf7\u6c42\u5931\u8d25:', resp.status);
-      return null;
-    }
-
-    const subtitleData = await resp.json();
-    const items = (subtitleData.body || [])
-      .filter(item => typeof item.content === 'string')
-      .map(item => ({
-        from: Number(item.from),
-        to: Number(item.to),
-        content: item.content.trim()
-      }));
-
-    if (!items.length) return null;
-
-    const isChinese = /^zh/i.test(track.lan || '');
-    const title = state.title || (state.videoData && state.videoData.title) || '';
-    const videoDataTitle = state.videoData && state.videoData.title;
-
-    return {
-      subtitles: items,
-      title: title || videoDataTitle || '',
-      lan: track.lan,
-      lanDoc: track.lan_doc,
-      direction: isChinese ? 'zh2en' : 'en2zh',
-      tracks: subtitlesList.map(item => ({ lan: item.lan, lan_doc: item.lan_doc })),
-    };
+    const run = ++state.generation;
+    stopLoop();
+    state.video = await waitForVideo();
+    if (run !== state.generation || !state.video) return;
+    const identity = videoIdentity();
+    Object.assign(state, { ...identity, cacheBase: identity.key, subtitles: [], currentIndex: -2 });
+    createUi();
+    await refreshRecords();
+    showChooser();
   }
 
   function waitForVideo(timeout = 15000) {
     return new Promise(resolve => {
-      const startedAt = Date.now();
-      const check = () => {
+      const started = Date.now();
+      const poll = () => {
         const video = document.querySelector('video.bpx-player-video') || document.querySelector('video');
-        if (video) resolve(video);
-        else if (Date.now() - startedAt > timeout) resolve(null);
-        else setTimeout(check, 200);
+        if (video || Date.now() - started > timeout) resolve(video || null);
+        else setTimeout(poll, 200);
       };
-      check();
+      poll();
     });
   }
 
-  async function requestTranslation(originalSubtitles, direction, run) {
-    isProcessing = true;
-
-    try {
-      for (let start = 0; start < originalSubtitles.length; start += 40) {
-        if (run !== generation) return false;
-        const context = originalSubtitles.slice(Math.max(0, start - 40), Math.min(originalSubtitles.length, start + 80))
-          .map(item => item.content).join('\n');
-        const result = await chrome.runtime.sendMessage({
-          action: 'translateSubtitles',
-          subtitles: originalSubtitles.slice(start, start + 40),
-          fullContext: context,
-          direction,
-        });
-        if (run !== generation) return false;
-        if (!result?.success || !Array.isArray(result.translations) || result.translations.length !== Math.min(40, originalSubtitles.length - start)) {
-          throw new Error(result?.error || '\u7ffb\u8bd1\u5931\u8d25');
-        }
-        translatedSubtitles.splice(start, result.translations.length, ...result.translations);
-        currentSubtitleIndex = -2;
-        updateSubtitleForCurrentTime();
-        showStatus(`已翻译 ${Math.min(start + 40, originalSubtitles.length)} / ${originalSubtitles.length} 条`, 'loading');
-      }
-      return true;
-    } catch (error) {
-      console.error('[B\u7ad9AI\u5b57\u5e55] \u7ffb\u8bd1\u5931\u8d25:', error);
-      if (run === generation) {
-        showStatus(`\u7ffb\u8bd1\u5931\u8d25\uff0c\u4ec5\u663e\u793a\u539f\u6587 / Translation failed: ${error.message}`, 'error');
-      }
-      return false;
-    } finally {
-      if (run === generation) isProcessing = false;
-    }
-  }
-
-  function createSubtitleContainer() {
+  function createUi() {
     document.getElementById('ai-subtitle-container')?.remove();
     document.getElementById('ai-subtitle-status')?.remove();
+    document.getElementById('ai-subtitle-chooser')?.remove();
+    state.chooser = el('div', 'ai-subtitle-chooser');
+    state.chooser.id = 'ai-subtitle-chooser';
+    state.recordSelect = el('select', 'ai-record-select');
+    state.recordSelect.title = '当前视频分P的本地字幕记录';
+    state.fileInput = el('input');
+    state.fileInput.type = 'file'; state.fileInput.accept = '.srt,application/x-subrip,text/plain'; state.fileInput.hidden = true;
+    state.fileInput.addEventListener('change', importSrt);
+    state.chooser.append(
+      el('span', 'ai-source-title', `字幕来源 · P${state.page}`),
+      button('导入 SRT', '从本机导入，直接播放，不调用模型', () => state.fileInput.click()),
+      state.recordSelect,
+      button('加载记录', '直接播放缓存，不调用模型', loadSelectedRecord),
+      button('提取英文并翻译', '读取当前分P英文 CC 并翻译', extractOnline),
+      button('×', '关闭来源选择', () => { state.chooser.hidden = true; }, 'icon-button'),
+      state.fileInput
+    );
 
-    subtitleContainer = document.createElement('div');
-    subtitleContainer.id = 'ai-subtitle-container';
-    subtitleContainer.className = 'ai-subtitle-hidden';
-    toolbar = document.createElement('div');
-    toolbar.className = 'ai-subtitle-toolbar';
-    toolbar.hidden = true;
-    const handle = document.createElement('span');
-    handle.className = 'ai-subtitle-handle';
-    handle.textContent = '⋮⋮';
-    handle.title = '拖动字幕 / Drag subtitles';
-    toolbar.appendChild(handle);
-    for (const format of ['txt', 'srt']) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.textContent = format.toUpperCase() + ' ↓';
-      button.title = `下载 ${format.toUpperCase()} 字幕`;
-      button.addEventListener('click', () => downloadSubtitles(format));
-      toolbar.appendChild(button);
+    state.panel = el('div', 'ai-subtitle-hidden'); state.panel.id = 'ai-subtitle-container';
+    const toolbar = el('div', 'ai-subtitle-toolbar');
+    const handle = el('span', 'ai-subtitle-handle', '⋮⋮'); handle.title = '拖动字幕'; handle.addEventListener('pointerdown', startDrag);
+    toolbar.append(handle, button('来源', '重新选择字幕来源', showChooser), button('TXT ↓', '下载 TXT', () => download('txt')),
+      button('SRT ↓', '下载 SRT', () => download('srt')), button('×', '关闭字幕', hidePanel, 'icon-button'));
+    state.body = el('div', 'ai-subtitle-body');
+    state.panel.append(toolbar, state.body);
+    state.status = el('div'); state.status.id = 'ai-subtitle-status'; state.status.hidden = true;
+    document.body.append(state.chooser, state.panel, state.status);
+    state.panel.style.fontSize = `${state.fontSize || 16}px`;
+    applyGeometry(); bindVideo();
+    new ResizeObserver(entries => {
+      const rect = entries[0]?.contentRect;
+      if (!rect || state.panel.classList.contains('ai-subtitle-hidden')) return;
+      state.size = { width: Math.round(rect.width), height: Math.round(rect.height) };
+      chrome.storage.local.set({ subtitleSize: state.size });
+    }).observe(state.panel);
+  }
+
+  async function refreshRecords() {
+    const stored = await chrome.storage.local.get(null);
+    const records = Object.entries(stored).filter(([key, record]) => key.startsWith(state.cacheBase) && validRecord(record)).sort((a, b) => b[1].savedAt - a[1].savedAt);
+    state.recordSelect.replaceChildren();
+    if (!records.length) {
+      const option = el('option', '', '无当前分P记录'); option.disabled = true; option.selected = true; state.recordSelect.append(option); return;
     }
-    subtitleBody = document.createElement('div');
-    subtitleBody.className = 'ai-subtitle-body';
-    subtitleContainer.append(toolbar, subtitleBody);
-    handle.addEventListener('pointerdown', startDrag);
-
-    statusElement = document.createElement('div');
-    statusElement.id = 'ai-subtitle-status';
-    statusElement.className = 'ai-subtitle-status';
-    statusElement.style.display = 'none';
-
-    document.body.append(statusElement, subtitleContainer);
-    applySubtitleConfig();
+    for (const [key, record] of records) {
+      const option = el('option', '', `${record.source === 'import' ? '导入' : '在线'} · ${record.fileName || record.part || ''} · ${record.subtitles.length} 条`);
+      option.value = key; state.recordSelect.append(option);
+    }
   }
 
-  function bindVideoEvents() {
-    videoElement.removeEventListener('play', startSubtitleLoop);
-    videoElement.removeEventListener('pause', pauseSubtitleLoop);
-    videoElement.removeEventListener('seeked', updateSubtitleForCurrentTime);
-    videoElement.addEventListener('play', startSubtitleLoop);
-    videoElement.addEventListener('pause', pauseSubtitleLoop);
-    videoElement.addEventListener('seeked', updateSubtitleForCurrentTime);
-    document.removeEventListener('fullscreenchange', attachToVisibleRoot);
-    document.addEventListener('fullscreenchange', attachToVisibleRoot);
+  function validRecord(record) {
+    if (!record || record.bvid !== state.bvid || Number(record.page) !== state.page || !Array.isArray(record.subtitles) || !record.subtitles.length) return false;
+    const end = Number(record.subtitles.at(-1)?.to || 0);
+    const duration = Number(state.video?.duration || record.duration || 0);
+    return !duration || end <= duration + 120;
   }
 
-  function attachToVisibleRoot() {
-    const root = document.fullscreenElement || document.body;
-    root.append(statusElement, subtitleContainer);
-    applySubtitleConfig();
+  async function loadSelectedRecord() {
+    if (!state.recordSelect.value) return showStatus('当前分P没有可用的本地记录', 'error');
+    const key = state.recordSelect.value;
+    const record = (await chrome.storage.local.get(key))[key];
+    if (!validRecord(record)) return showStatus('记录与当前视频不匹配，已拒绝加载', 'error');
+    activate(record.subtitles, `已加载本地记录，共 ${record.subtitles.length} 条`);
+  }
+
+  async function importSrt(event) {
+    const file = event.target.files?.[0]; event.target.value = '';
+    if (!file) return;
+    try {
+      const parsed = parseSrt(await file.text());
+      if (!parsed.length) throw new Error('没有识别到有效时间轴');
+      const end = Number(parsed.at(-1).to);
+      if (state.video.duration && end > state.video.duration + 120) throw new Error(`字幕时长 ${Math.round(end)} 秒与当前视频 ${Math.round(state.video.duration)} 秒不匹配`);
+      const key = `${state.cacheBase}import:${Date.now()}`;
+      await chrome.storage.local.set({ [key]: makeRecord(parsed, 'import', { fileName: file.name }) });
+      await refreshRecords(); activate(parsed, `已导入 ${file.name}，共 ${parsed.length} 条`);
+    } catch (error) { showStatus(`导入失败：${error.message}`, 'error'); }
+  }
+
+  function parseSrt(text) {
+    return String(text).replace(/^\uFEFF/, '').split(/\r?\n\s*\r?\n/).flatMap(block => {
+      const lines = block.trim().split(/\r?\n/); const timing = lines.findIndex(line => line.includes('-->'));
+      const match = timing >= 0 && lines[timing].match(/(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)/);
+      if (!match) return [];
+      const seconds = values => Number(values[0]) * 3600 + Number(values[1]) * 60 + Number(values[2]) + Number(values[3].padEnd(3, '0').slice(0, 3)) / 1000;
+      const subtitleLines = lines.slice(timing + 1).map(line => line.trim()).filter(Boolean);
+      if (!subtitleLines.length) return [];
+      const translationIndex = subtitleLines.findIndex((line, index) => index > 0 && /[\u3400-\u9fff]/.test(line));
+      const content = (translationIndex > 0 ? subtitleLines.slice(0, translationIndex) : subtitleLines).join('\n');
+      const translation = translationIndex > 0 ? subtitleLines.slice(translationIndex).join('\n') : '';
+      return [{ from: seconds(match.slice(1, 5)), to: seconds(match.slice(5, 9)), content, translation }];
+    }).filter(item => Number.isFinite(item.from) && item.to >= item.from).sort((a, b) => a.from - b.from);
+  }
+
+  async function extractOnline() {
+    const run = state.generation; showStatus('正在读取当前分P的英文 CC 字幕…', 'loading');
+    try {
+      let result = await chrome.runtime.sendMessage({ action: 'fetchSubtitles', bvid: state.bvid, page: state.page });
+      if (run !== state.generation) return;
+      if (!result?.success || !result.subtitles?.length) {
+        const directError = result?.error || result?.hint || '字幕元数据没有下载地址';
+        showStatus('元数据地址不可用，正在读取播放器已加载的英文字幕…', 'loading');
+        result = await findPlayerLoadedSubtitles();
+        if (!result?.subtitles?.length) throw new Error(`${directError}；播放器资源中也未找到完整英文字幕`);
+      }
+      if (result.page !== undefined && Number(result.page) !== state.page) throw new Error('接口返回了其他分P，已拒绝加载');
+      const duration = Number(result.duration || state.video.duration || 0), end = Number(result.subtitles.at(-1)?.to || 0);
+      if (duration && end > duration + 120) throw new Error('英文轨道时长与当前分P不匹配');
+      state.subtitles = result.subtitles.map(item => ({ ...item, translation: '' }));
+      activate(state.subtitles, `已提取英文 ${state.subtitles.length} 条，开始翻译…`, false);
+      await translateAll(result, run);
+    } catch (error) { showStatus(`英文字幕提取失败：${error.message}`, 'error'); }
+  }
+
+  async function findPlayerLoadedSubtitles() {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const urls = performance.getEntriesByType('resource')
+        .filter(entry => /(?:ai[_-]?subtitle|subtitle|caption|\/bfs\/)/i.test(entry.name))
+        .sort((a, b) => b.startTime - a.startTime)
+        .map(entry => entry.name);
+      const result = await chrome.runtime.sendMessage({
+        action: 'fetchLoadedSubtitleCandidates',
+        urls: [...new Set([...state.resourceUrls, ...urls])],
+        duration: Number(state.video.duration || 0),
+      });
+      if (result?.success && result.subtitles?.length) {
+        return { ...result, page: state.page, duration: Number(state.video.duration || 0), part: `P${state.page}` };
+      }
+      await new Promise(resolve => setTimeout(resolve, 800));
+    }
+    return null;
+  }
+
+  async function translateAll(meta, run) {
+    for (let start = 0; start < state.subtitles.length; start += 40) {
+      if (run !== state.generation) return;
+      const context = state.subtitles.slice(Math.max(0, start - 40), Math.min(state.subtitles.length, start + 80)).map(item => item.content).join('\n');
+      const response = await chrome.runtime.sendMessage({ action: 'translateSubtitles', direction: 'en2zh', fullContext: context, subtitles: state.subtitles.slice(start, start + 40) });
+      if (!response?.success || response.translations?.length !== Math.min(40, state.subtitles.length - start)) {
+        await chrome.storage.local.set({ [`${state.cacheBase}online`]: makeRecord(state.subtitles, 'online', meta) });
+        throw new Error(response?.error || '翻译返回数量不正确');
+      }
+      state.subtitles.splice(start, response.translations.length, ...response.translations);
+      state.currentIndex = -2; update(); showStatus(`翻译中 ${Math.min(start + 40, state.subtitles.length)} / ${state.subtitles.length}`, 'loading');
+      await chrome.storage.local.set({ [`${state.cacheBase}online`]: makeRecord(state.subtitles, 'online', meta) });
+    }
+    await refreshRecords(); showStatus(`英文提取与翻译完成，共 ${state.subtitles.length} 条`, 'success');
+  }
+
+  function makeRecord(subtitles, source, meta = {}) {
+    return { schema: 2, bvid: state.bvid, page: state.page, cid: meta.cid || null, part: meta.part || '', fileName: meta.fileName || '', duration: Number(meta.duration || state.video.duration || 0), source, savedAt: Date.now(), subtitles };
+  }
+
+  function activate(subtitles, message, hideChooser = true) {
+    state.subtitles = subtitles; state.currentIndex = -2; state.panel.classList.remove('ai-subtitle-hidden');
+    if (hideChooser) state.chooser.hidden = true; startLoop(); update(); showStatus(message, 'success');
+  }
+
+  function bindVideo() {
+    state.video.addEventListener('play', startLoop); state.video.addEventListener('pause', stopLoop); state.video.addEventListener('seeked', update);
+    document.removeEventListener('fullscreenchange', attachRoot); document.addEventListener('fullscreenchange', attachRoot);
+  }
+  function attachRoot() { (document.fullscreenElement || document.body).append(state.chooser, state.panel, state.status); applyGeometry(); }
+  function startLoop() { if (state.frame) return; const loop = () => { update(); state.frame = requestAnimationFrame(loop); }; state.frame = requestAnimationFrame(loop); }
+  function stopLoop() { if (state.frame) cancelAnimationFrame(state.frame); state.frame = 0; }
+
+  function update() {
+    if (!state.video || !state.subtitles.length) return;
+    const time = state.video.currentTime; let low = 0, high = state.subtitles.length - 1, index = -1;
+    while (low <= high) { const mid = (low + high) >> 1; if (state.subtitles[mid].from <= time) { index = mid; low = mid + 1; } else high = mid - 1; }
+    if (index >= 0 && time > state.subtitles[index].to) index = -1;
+    if (index !== state.currentIndex) { state.currentIndex = index; render(index); }
+  }
+
+  function render(center) {
+    state.body.replaceChildren();
+    if (center < 0) return state.panel.classList.add('ai-subtitle-no-cue');
+    state.panel.classList.remove('ai-subtitle-no-cue', 'ai-subtitle-hidden');
+    const start = Math.max(0, center - CONTEXT_RADIUS), end = Math.min(state.subtitles.length - 1, center + CONTEXT_RADIUS);
+    for (let i = start; i <= end; i++) {
+      const item = state.subtitles[i], line = el('div', `subtitle-line${i === center ? ' subtitle-current' : ''}`);
+      line.append(el('div', 'subtitle-original', item.content || ''));
+      if (item.translation) line.append(el('div', 'subtitle-translation', item.translation));
+      state.body.append(line);
+    }
+  }
+
+  function showChooser() { state.chooser.hidden = false; }
+  function hidePanel() { state.panel.classList.add('ai-subtitle-hidden'); stopLoop(); }
+  function showStatus(message, type) {
+    state.status.textContent = message; state.status.dataset.type = type; state.status.hidden = false; clearTimeout(showStatus.timer);
+    if (type !== 'loading' && type !== 'error') showStatus.timer = setTimeout(() => { state.status.hidden = true; }, 3500);
   }
 
   function startDrag(event) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    const rect = subtitleContainer.getBoundingClientRect();
-    const offsetX = event.clientX - rect.left;
-    const offsetY = event.clientY - rect.top;
-    const move = e => {
-      const width = subtitleContainer.offsetWidth;
-      const height = subtitleContainer.offsetHeight;
-      dragPosition = {
-        x: Math.max(0, Math.min(innerWidth - width, e.clientX - offsetX)),
-        y: Math.max(0, Math.min(innerHeight - height, e.clientY - offsetY)),
-      };
-      applySubtitleConfig();
-    };
-    const end = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', end);
-      if (dragPosition) chrome.storage.local.set({ subtitleCoordinates: dragPosition });
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', end, { once: true });
+    if (event.button !== 0) return; event.preventDefault();
+    const rect = state.panel.getBoundingClientRect(), dx = event.clientX - rect.left, dy = event.clientY - rect.top;
+    const move = e => { state.dragPosition = { x: Math.max(0, Math.min(innerWidth - rect.width, e.clientX - dx)), y: Math.max(0, Math.min(innerHeight - rect.height, e.clientY - dy)) }; applyGeometry(); };
+    const end = () => { removeEventListener('pointermove', move); chrome.storage.local.set({ subtitleCoordinates: state.dragPosition }); };
+    addEventListener('pointermove', move); addEventListener('pointerup', end, { once: true });
   }
 
-  function downloadSubtitles(format) {
-    const entries = translatedSubtitles.length ? translatedSubtitles : subtitles;
-    if (!entries.length) return;
-    const timestamp = time => {
-      const ms = Math.round(Math.max(0, Number(time)) * 1000);
-      return `${String(Math.floor(ms / 3600000)).padStart(2, '0')}:${String(Math.floor(ms / 60000) % 60).padStart(2, '0')}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')},${String(ms % 1000).padStart(3, '0')}`;
-    };
-    const text = entries.map((item, index) => {
-      const lines = [item.content, item.translation].filter(Boolean).join('\n');
-      return format === 'srt' ? `${index + 1}\n${timestamp(item.from)} --> ${timestamp(item.to)}\n${lines}` : lines;
-    }).join('\n\n') + '\n';
-    const blobUrl = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
-    const link = document.createElement('a');
-    link.href = blobUrl;
-    link.download = `${window.location.pathname.match(/BV[0-9A-Za-z]+/)?.[0] || 'video'}-bilingual.${format}`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-  }
-
-  function startSubtitleLoop() {
-    if (animationFrameId) return;
-    const loop = () => {
-      updateSubtitleForCurrentTime();
-      animationFrameId = requestAnimationFrame(loop);
-    };
-    animationFrameId = requestAnimationFrame(loop);
-  }
-
-  function pauseSubtitleLoop() {
-    if (animationFrameId) {
-      cancelAnimationFrame(animationFrameId);
-      animationFrameId = null;
+  function applyGeometry() {
+    if (!state.panel) return;
+    if (state.dragPosition) {
+      state.panel.style.left = `${Math.max(0, Math.min(state.dragPosition.x, innerWidth - 240))}px`;
+      state.panel.style.top = `${Math.max(0, Math.min(state.dragPosition.y, innerHeight - 120))}px`;
+      state.panel.style.bottom = 'auto'; state.panel.style.transform = 'none';
     }
+    if (state.size) { state.panel.style.width = `${state.size.width}px`; state.panel.style.height = `${state.size.height}px`; }
   }
 
-  function findActiveIndex(list, time) {
-    let active = -1;
-    for (let index = 0; index < list.length; index++) {
-      if (list[index].from > time) break;
-      if (time <= list[index].to) { active = index; break; }
-    }
-    return active;
+  function download(format) {
+    if (!state.subtitles.length) return;
+    const stamp = seconds => { const ms = Math.round(Number(seconds) * 1000); return `${String(Math.floor(ms / 3600000)).padStart(2, '0')}:${String(Math.floor(ms / 60000) % 60).padStart(2, '0')}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')},${String(ms % 1000).padStart(3, '0')}`; };
+    const text = state.subtitles.map((item, index) => { const body = [item.content, item.translation].filter(Boolean).join('\n'); return format === 'srt' ? `${index + 1}\n${stamp(item.from)} --> ${stamp(item.to)}\n${body}` : body; }).join('\n\n') + '\n';
+    const url = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' })), link = el('a');
+    link.href = url; link.download = `${state.bvid}-p${state.page}-subtitles.${format}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 30000);
   }
 
-  function updateSubtitleForCurrentTime() {
-    if (!videoElement || !translatedSubtitles.length) return;
-    const index = findActiveIndex(translatedSubtitles, videoElement.currentTime);
-
-    if (index < 0) {
-      if (!subtitleContainer.classList.contains('ai-subtitle-hidden')) {
-        subtitleContainer.classList.add('ai-subtitle-hidden');
-        currentSubtitleIndex = -2;
-      }
-      return;
-    }
-
-    if (index !== currentSubtitleIndex) {
-      currentSubtitleIndex = index;
-      renderWindow(index);
-    }
-  }
-
-  function renderWindow(centerIndex) {
-    if (!subtitleContainer) return;
-    subtitleBody.replaceChildren();
-
-    if (centerIndex < 0 || !translatedSubtitles.length) {
-      subtitleContainer.classList.add('ai-subtitle-hidden');
-      return;
-    }
-
-    const start = Math.max(0, centerIndex - CONTEXT_BEFORE);
-    const end = Math.min(translatedSubtitles.length - 1, centerIndex + CONTEXT_AFTER);
-
-    for (let index = start; index <= end; index++) {
-      const item = translatedSubtitles[index];
-      const line = document.createElement('div');
-      line.className = 'subtitle-line';
-      if (index < centerIndex) line.classList.add('subtitle-past');
-      if (index === centerIndex) line.classList.add('subtitle-current');
-
-      const original = document.createElement('div');
-      original.className = 'subtitle-original';
-      original.textContent = item.content || '';
-
-      const translation = document.createElement('div');
-      translation.className = 'subtitle-translation';
-      translation.textContent = item.translation || '';
-
-      line.appendChild(original);
-      line.appendChild(translation);
-      subtitleBody.appendChild(line);
-    }
-
-    subtitleContainer.classList.remove('ai-subtitle-hidden');
-  }
-
-  function clearSubtitle() {
-    if (!subtitleContainer) return;
-    subtitleBody.replaceChildren();
-    subtitleContainer.classList.add('ai-subtitle-hidden');
-    currentSubtitleIndex = -2;
-  }
-
-  function applySubtitleConfig() {
-    if (!subtitleContainer) return;
-    subtitleContainer.style.fontSize = `${CONFIG.fontSize}px`;
-    if (dragPosition) {
-      subtitleContainer.style.transform = 'none';
-      subtitleContainer.style.left = `${Math.max(0, Math.min(innerWidth - subtitleContainer.offsetWidth, dragPosition.x))}px`;
-      subtitleContainer.style.top = `${Math.max(0, Math.min(innerHeight - subtitleContainer.offsetHeight, dragPosition.y))}px`;
-      subtitleContainer.style.bottom = 'auto';
-    } else {
-      subtitleContainer.style.transform = 'translateX(-50%)';
-      subtitleContainer.style.left = '50%';
-      subtitleContainer.style.top = CONFIG.subtitlePosition === 'top' ? '58px' : 'auto';
-      subtitleContainer.style.bottom = CONFIG.subtitlePosition === 'top' ? 'auto' : '68px';
-    }
-  }
-
-  function showStatus(message, type) {
-    if (!statusElement) return;
-    statusElement.textContent = message;
-    statusElement.dataset.type = type;
-    statusElement.style.display = 'block';
-  }
-
-  function hideStatus() {
-    if (statusElement) statusElement.style.display = 'none';
-  }
-
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'reloadSubtitles') {
-      init();
-      sendResponse({ success: true });
-    } else if (request.action === 'updateConfig') {
-      Object.assign(CONFIG, request.config);
-      applySubtitleConfig();
-      sendResponse({ success: true });
+  chrome.runtime.onMessage.addListener((request, sender, respond) => {
+    if (request.action === 'reloadSubtitles') { init(); respond({ success: true }); }
+    else if (request.action === 'updateConfig') {
+      if (request.config?.fontSize && state.panel) state.panel.style.fontSize = `${request.config.fontSize}px`;
+      respond({ success: true });
     }
     return true;
   });
-
-  function watchNavigation() {
-    let lastHref = window.location.href;
-    navigationPollId = setInterval(async () => {
-      if (window.location.href === lastHref) return;
-      lastHref = window.location.href;
-      if (!/\/(?:video|bangumi)\//.test(window.location.pathname)) return;
-
-      pauseSubtitleLoop();
-      generation++;
-      subtitles = [];
-      translatedSubtitles = [];
-      await new Promise(resolve => setTimeout(resolve, 700));
-      init();
-    }, 1000);
+  async function loadPreferences() {
+    const stored = await chrome.storage.local.get(['subtitleCoordinates', 'subtitleSize', 'fontSize']);
+    state.dragPosition = stored.subtitleCoordinates || null; state.size = stored.subtitleSize || null;
+    state.fontSize = Number(stored.fontSize || 16);
   }
-
-  const loadDisplayConfig = async () => {
-    const result = await chrome.storage.local.get(['fontSize', 'position', 'subtitleCoordinates']);
-    CONFIG.fontSize = Number(result.fontSize || 18);
-    CONFIG.subtitlePosition = result.position || 'bottom';
-    dragPosition = result.subtitleCoordinates || null;
-    applySubtitleConfig();
-  };
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', async () => {
-      await loadDisplayConfig();
-      init();
-      watchNavigation();
-    });
-  } else {
-    loadDisplayConfig().then(() => {
-      init();
-      watchNavigation();
-    });
-  }
+  let lastUrl = location.href;
+  setInterval(() => { if (location.href !== lastUrl) { lastUrl = location.href; if (/\/video\//.test(location.pathname)) setTimeout(init, 700); } }, 700);
+  const begin = async () => { await loadPreferences(); await init(); };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', begin, { once: true }); else begin();
 })();

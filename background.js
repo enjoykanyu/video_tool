@@ -15,33 +15,6 @@ const API_CONFIG = {
 };
 
 
-// This video's English transcript is packaged as a fallback when Bilibili exposes no CC track.
-const PACKAGED_TRANSCRIPTS = {
-  BV1c1qvBFEVw: 'subtitles/NA/NA-UCB CS168 SP25 Introduction to the Internet： Architecture and Protocols p01 1 Intro 1 - Layers of the Internet.en-US.srt',
-};
-
-function parseSrt(text) {
-  return text.replace(/^\uFEFF/, '').split(/\r?\n\s*\r?\n/).flatMap(block => {
-    const lines = block.trim().split(/\r?\n/);
-    const timing = lines.findIndex(line => /-->/.test(line));
-    if (timing < 0) return [];
-    const match = lines[timing].match(/(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)/);
-    if (!match) return [];
-    const seconds = (h, m, s, ms) => Number(h) * 3600 + Number(m) * 60 + Number(s) + Number(ms.padEnd(3, '0').slice(0, 3)) / 1000;
-    const content = lines.slice(timing + 1).join('\n').trim();
-    return content ? [{ from: seconds(...match.slice(1, 5)), to: seconds(...match.slice(5, 9)), content }] : [];
-  });
-}
-
-async function packagedTranscript(bvid, page) {
-  if (page !== 1 || !PACKAGED_TRANSCRIPTS[bvid]) return null;
-  const response = await fetch(chrome.runtime.getURL(PACKAGED_TRANSCRIPTS[bvid]));
-  if (!response.ok) throw new Error('内置英文字幕读取失败');
-  const subtitles = parseSrt(await response.text());
-  if (!subtitles.length) throw new Error('内置英文字幕内容为空');
-  return { subtitles, lan: 'en-US', lanDoc: '英文', direction: 'en2zh', source: 'packaged' };
-}
-
 const BILI_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
   'Referer': 'https://www.bilibili.com/',
@@ -55,25 +28,48 @@ async function biliGet(url) {
 
 function pickSubtitleTrack(list) {
   if (!Array.isArray(list) || !list.length) return null;
-  return (
-    list.find(item => /^en/i.test(item.lan)) ||
-    list.find(item => ['zh-CN', 'zh-Hans'].includes(item.lan)) ||
-    list[0]
-  );
+  return list.find(item => /^en(?:[-_]|$)/i.test(item.lan || '') || /英文|英语|English/i.test(item.lan_doc || '')) || null;
 }
 
 async function fetchSubtitlesForVideo({ bvid, page }) {
-  const fallback = () => packagedTranscript(bvid, page);
-  try {
-    const online = await fetchOnlineSubtitles(bvid, page);
-    return (online && (/^en/i.test(online.lan) || !PACKAGED_TRANSCRIPTS[bvid]) ? online : null) || await fallback() || online || {
-      subtitles: [], hint: '此视频未提供可下载的 CC 字幕轨道；画面内嵌文字需语音识别或 OCR，无法直接提取。',
-    };
-  } catch (error) {
-    const packaged = await fallback();
-    if (packaged) return packaged;
-    throw error;
+  return await fetchOnlineSubtitles(bvid, page) || {
+    subtitles: [],
+    hint: '当前登录态未返回英文 CC 轨道。请确认播放器字幕菜单中确有英文轨道，并保持 B 站登录。',
+  };
+}
+
+function normalizeSubtitleBody(data) {
+  const body = Array.isArray(data?.body) ? data.body : Array.isArray(data?.data?.body) ? data.data.body : [];
+  return body.filter(item => typeof item.content === 'string' && Number.isFinite(Number(item.from)) && Number.isFinite(Number(item.to)))
+    .map(item => ({ from: Number(item.from), to: Number(item.to), content: item.content.trim() }))
+    .filter(item => item.content && item.to >= item.from);
+}
+
+function isEnglishSubtitle(subtitles) {
+  const sample = subtitles.slice(0, 120).map(item => item.content).join(' ');
+  const latin = (sample.match(/[A-Za-z]/g) || []).length;
+  const cjk = (sample.match(/[\u3400-\u9fff]/g) || []).length;
+  return latin >= 20 && latin > cjk * 2;
+}
+
+async function fetchLoadedSubtitleCandidates(urls, duration) {
+  const allowed = /^(?:[^.]+\.)*(?:hdslb\.com|bilibili\.com)$/i;
+  const expectedDuration = Number(duration || 0);
+  for (const value of Array.isArray(urls) ? urls.slice(0, 20) : []) {
+    let url;
+    try { url = new URL(value); } catch (_) { continue; }
+    if (url.protocol !== 'https:' || !allowed.test(url.hostname)) continue;
+    try {
+      const data = await biliGet(url.href);
+      const subtitles = normalizeSubtitleBody(data);
+      if (!subtitles.length || !isEnglishSubtitle(subtitles)) continue;
+      const end = subtitles.at(-1).to;
+      // Full subtitle files normally end near the video duration; this rejects stale SPA resources.
+      if (expectedDuration && (end > expectedDuration + 120 || end < expectedDuration * 0.65)) continue;
+      return { subtitles, source: 'player-resource', resourceUrl: url.href };
+    } catch (_) {}
   }
+  return null;
 }
 
 async function fetchOnlineSubtitles(bvid, page) {
@@ -81,34 +77,44 @@ async function fetchOnlineSubtitles(bvid, page) {
   if (view.code !== 0) throw new Error(`视频信息接口错误: ${view.message || view.code}`);
 
   const pages = view.data?.pages || [];
-  const targetPage = pages.find(item => item.page === page) || pages[0];
+  const targetPage = pages.find(item => Number(item.page) === Number(page));
   const aid = view.data?.aid;
-  const cid = targetPage?.cid || view.data?.cid;
+  const cid = targetPage?.cid;
   if (!aid || !cid) throw new Error('无法解析视频的 aid/cid');
 
-  const player = await biliGet(
-    `https://api.bilibili.com/x/player/v2?aid=${aid}&cid=${cid}&bvid=${encodeURIComponent(bvid)}`
-  );
-  if (player.code !== 0) throw new Error(`字幕元数据错误: ${player.message || player.code}`);
-
-  const tracks = player.data?.subtitle?.subtitles || [];
+  const urls = [
+    `https://api.bilibili.com/x/player/v2?aid=${aid}&cid=${cid}&bvid=${encodeURIComponent(bvid)}`,
+    `https://api.bilibili.com/x/player/wbi/v2?aid=${aid}&cid=${cid}&bvid=${encodeURIComponent(bvid)}`,
+  ];
+  let tracks = [];
+  for (const url of urls) {
+    const player = await biliGet(url);
+    if (player.code === 0) tracks = player.data?.subtitle?.subtitles || [];
+    if (tracks.length) break;
+  }
   if (!tracks.length) return null;
 
   const track = pickSubtitleTrack(tracks);
-  const subtitleUrl = track.subtitle_url.startsWith('http') ? track.subtitle_url : `https:${track.subtitle_url}`;
+  if (!track) return null;
+  const rawUrl = track.subtitle_url || track.subtitleUrl || track.url || '';
+  const subtitleUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : rawUrl.startsWith('//') ? `https:${rawUrl}` : '';
+  if (!subtitleUrl) throw new Error('英文轨道存在，但字幕下载地址为空');
   const subtitleData = await biliGet(subtitleUrl);
-  const subtitles = (subtitleData.body || [])
-    .filter(item => typeof item.content === 'string')
-    .map(item => ({ from: Number(item.from), to: Number(item.to), content: item.content }));
+  const subtitles = normalizeSubtitleBody(subtitleData);
   if (!subtitles.length) return null;
 
-  const isChinese = /^zh/i.test(track.lan || '');
   return {
     subtitles,
     title: view.data?.title || '',
     lan: track.lan,
     lanDoc: track.lan_doc,
-    direction: isChinese ? 'zh2en' : 'en2zh',
+    direction: 'en2zh',
+    aid,
+    cid,
+    page: Number(targetPage.page),
+    duration: Number(targetPage.duration || 0),
+    part: targetPage.part || '',
+    source: 'online',
     tracks: tracks.map(item => ({ lan: item.lan, lan_doc: item.lan_doc })),
   };
 }
@@ -267,6 +273,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     try {
       if (request.action === 'fetchSubtitles') {
         sendResponse({ success: true, ...(await fetchSubtitlesForVideo(request)) });
+      } else if (request.action === 'fetchLoadedSubtitleCandidates') {
+        const result = await fetchLoadedSubtitleCandidates(request.urls, request.duration);
+        sendResponse({ success: true, ...(result || { subtitles: [] }) });
       } else if (request.action === 'translateSubtitles') {
         const config = await getConfig();
         const translations = await translateWithAI(
