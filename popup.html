@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>B站AI双语字幕 - 设置</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, "Microsoft YaHei", "PingFang SC", sans-serif;
+      background: #1a1a1a;
+      color: #f0f0f0;
+      padding: 16px;
+      width: 360px;
+      font-size: 14px;
+    }
+    h1 {
+      font-size: 16px;
+      margin-bottom: 12px;
+      color: #00a1d6;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    h1::before {
+      content: "🎬";
+    }
+    .section {
+      background: #252525;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .section-title {
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .form-group {
+      margin-bottom: 12px;
+    }
+    .form-group:last-child {
+      margin-bottom: 0;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      color: #ccc;
+      font-size: 13px;
+    }
+    input[type="text"],
+    input[type="password"],
+    select,
+    textarea {
+      width: 100%;
+      padding: 8px 10px;
+      background: #2a2a2a;
+      border: 1px solid #444;
+      border-radius: 5px;
+      color: #fff;
+      font-size: 13px;
+      transition: border-color 0.2s;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: #00a1d6;
+    }
+    textarea {
+      min-height: 80px;
+      resize: vertical;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    .btn {
+      width: 100%;
+      padding: 10px;
+      background: #00a1d6;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background 0.2s;
+      margin-top: 8px;
+    }
+    .btn:hover {
+      background: #008fc4;
+    }
+    .btn.secondary {
+      background: #3a3a3a;
+    }
+    .btn.secondary:hover {
+      background: #4a4a4a;
+    }
+    .status {
+      padding: 8px 12px;
+      border-radius: 5px;
+      margin-bottom: 12px;
+      font-size: 13px;
+      display: none;
+    }
+    .status.success {
+      background: rgba(40, 167, 69, 0.2);
+      color: #28a745;
+      display: block;
+    }
+    .status.error {
+      background: rgba(220, 53, 69, 0.2);
+      color: #dc3545;
+      display: block;
+    }
+    .hint {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+    }
+    .provider-info {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+      padding: 6px 8px;
+      background: #2a2a2a;
+      border-radius: 4px;
+    }
+    .footer {
+      text-align: center;
+      padding-top: 12px;
+      border-top: 1px solid #333;
+      font-size: 11px;
+      color: #666;
+    }
+    .footer a {
+      color: #00a1d6;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>B站AI双语字幕</h1>
+  
+  <div id="status" class="status"></div>
+  
+  <div class="section">
+    <div class="section-title">API 配置</div>
+    
+    <div class="form-group">
+      <label for="provider">服务商</label>
+      <select id="provider">
+        <option value="bailian">阿里云百炼（推荐）</option>
+        <option value="openai">OpenAI 兼容接口</option>
+      </select>
+      <div class="hint">选择用于翻译的大模型服务商</div>
+    </div>
+
+    <div class="form-group">
+      <label for="baseUrl">Base URL</label>
+      <input type="url" id="baseUrl" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
+      <div class="hint">百炼请填 compatible-mode/v1 结尾的地址</div>
+    </div>
+    
+    <div class="form-group">
+      <label for="apiKey">API Key</label>
+      <input type="password" id="apiKey" placeholder="sk-...">
+      <div class="hint">密钥仅保存在本地，不会上传</div>
+    </div>
+    
+    <div class="form-group">
+      <label for="model">模型名称</label>
+      <input type="text" id="model" placeholder="gpt-4o-mini">
+      <div class="provider-info" id="modelHint">
+        百炼推荐: deepseek-v4-flash | qwen3.8-max | qwen3.8-flash
+      </div>
+    </div>
+    
+    <button class="btn secondary" id="testBtn">🔗 测试连接</button>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">翻译设置</div>
+    
+    <div class="form-group">
+      <label for="prompt">翻译提示词</label>
+      <textarea id="prompt" placeholder="自定义翻译prompt..."></textarea>
+      <div class="hint">使用 {fullContext} 和 {subtitlesJson} 作为变量</div>
+    </div>
+    
+    <button class="btn" id="resetPrompt">🔄 恢复默认提示词</button>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">显示设置</div>
+    
+    <div class="form-group">
+      <label for="fontSize">字幕字号</label>
+      <select id="fontSize">
+        <option value="14">小 (14px)</option>
+        <option value="16" selected>中 (16px)</option>
+        <option value="20">大 (20px)</option>
+        <option value="24">超大 (24px)</option>
+      </select>
+    </div>
+    
+    <div class="form-group">
+      <label for="position">字幕位置</label>
+      <select id="position">
+        <option value="bottom" selected>底部</option>
+        <option value="top">顶部</option>
+        <option value="custom">自定义</option>
+      </select>
+    </div>
+  </div>
+  
+  <button class="btn" id="saveBtn">💾 保存设置</button>
+  
+  <div class="footer">
+    v1.0.0 | <a href="#" id="helpLink">使用帮助</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

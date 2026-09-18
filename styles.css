@@ -1,0 +1,112 @@
+#ai-subtitle-container {
+  position: absolute;
+  bottom: 68px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(78%, 760px);
+  padding: 10px 20px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(4px);
+  color: #fff;
+  font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  font-size: 18px;
+  line-height: 1.5;
+  text-align: center;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8);
+  z-index: 999999;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+}
+
+#ai-subtitle-container.ai-subtitle-hidden {
+  opacity: 0;
+}
+
+#ai-subtitle-container.ai-subtitle-top {
+  top: 58px;
+  bottom: auto;
+}
+
+#ai-subtitle-container.ai-subtitle-fullscreen {
+  bottom: 88px;
+}
+
+#ai-subtitle-container .subtitle-line {
+  padding: 3px 0;
+  opacity: 0.45;
+  transition: opacity 0.2s ease;
+}
+
+#ai-subtitle-container .subtitle-line.subtitle-past {
+  opacity: 0.3;
+  font-size: 0.82em;
+}
+
+#ai-subtitle-container .subtitle-line.subtitle-current {
+  opacity: 1;
+}
+
+#ai-subtitle-container .subtitle-line.subtitle-current .subtitle-original {
+  color: #fff;
+}
+
+#ai-subtitle-container .subtitle-original {
+  font-weight: 600;
+}
+
+#ai-subtitle-container .subtitle-translation {
+  margin-top: 2px;
+  color: #f2f2f2;
+  font-size: 0.88em;
+}
+
+#ai-subtitle-container .subtitle-line.subtitle-current .subtitle-translation {
+  color: #ffd96b;
+}
+
+#ai-subtitle-status {
+  position: absolute;
+  bottom: 68px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(80%, 520px);
+  padding: 7px 16px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 13px;
+  text-align: center;
+  z-index: 999998;
+  pointer-events: none;
+}
+
+#ai-subtitle-status[data-type="loading"]::after {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-left: 8px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: ai-subtitle-spin 0.8s linear infinite;
+}
+
+#ai-subtitle-status[data-type="error"] {
+  background: rgba(190, 45, 55, 0.88);
+}
+
+@keyframes ai-subtitle-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 768px) {
+  #ai-subtitle-container {
+    width: 90%;
+    font-size: 14px;
+    padding: 8px 14px;
+  }
+}
