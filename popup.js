@@ -12,6 +12,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   const backgroundOpacityValue = document.getElementById('backgroundOpacityValue');
   const status = document.getElementById('status');
   const modelHint = document.getElementById('modelHint');
+  const modelSummary = document.getElementById('modelSummary');
+  const fontSummary = document.getElementById('fontSummary');
+
+  function closeModals() {
+    document.querySelectorAll('.modal.open').forEach(modal => modal.classList.remove('open'));
+  }
+
+  document.querySelectorAll('[data-open-modal]').forEach(button => {
+    button.addEventListener('click', () => document.getElementById(button.dataset.openModal)?.classList.add('open'));
+  });
+  document.querySelectorAll('[data-close-modal]').forEach(button => button.addEventListener('click', closeModals));
+  document.querySelectorAll('.modal').forEach(modal => modal.addEventListener('click', event => {
+    if (event.target === modal) closeModals();
+  }));
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') closeModals(); });
   
   const DEFAULT_PROMPT = `你是一位专业的视频字幕翻译专家。请根据以下要求翻译：
 
@@ -47,9 +62,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (result.backgroundOpacity) backgroundOpacity.value = String(Math.max(20, Math.min(90, Number(result.backgroundOpacity))));
   updateFontSizeLabel();
   updateBackgroundOpacityLabel();
+  updateSummaries();
 
   fontSize.addEventListener('input', updateFontSizeLabel);
   backgroundOpacity.addEventListener('input', updateBackgroundOpacityLabel);
+  model.addEventListener('input', updateSummaries);
 
   function updateFontSizeLabel() {
     fontSizeValue.textContent = `${fontSize.value}px`;
@@ -57,6 +74,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function updateBackgroundOpacityLabel() {
     backgroundOpacityValue.textContent = `${backgroundOpacity.value}%`;
+  }
+
+  function updateSummaries() {
+    modelSummary.textContent = model.value.trim() || '未设置';
+    fontSummary.textContent = `${fontSize.value}px`;
   }
   
   updateModelHint(provider.value);
@@ -107,6 +129,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       showStatus('✗ 测试失败: ' + error.message, 'error');
     }
   });
+  document.getElementById('testQuickBtn').addEventListener('click', () => {
+    document.getElementById('apiModal').classList.add('open');
+    document.getElementById('testBtn').click();
+  });
 
   // 恢复默认提示词
   document.getElementById('resetPrompt').addEventListener('click', () => {
@@ -142,6 +168,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       
       showStatus('✓ 设置已保存', 'success');
+      closeModals();
     } catch (error) {
       showStatus('✗ 保存失败: ' + error.message, 'error');
     }
