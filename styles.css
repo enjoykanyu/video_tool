@@ -63,11 +63,12 @@
   resize: both;
   border: 1px solid rgba(255, 255, 255, 0.34);
   border-radius: 6px;
-  background: rgba(15, 16, 18, 0.84);
+  background: rgb(15 16 18 / var(--ai-subtitle-bg-opacity, 0.55));
   color: #fff;
   text-align: center;
   text-shadow: 0 1px 3px #000;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(2px);
 }
 
 #ai-subtitle-container.ai-subtitle-hidden { display: none; }

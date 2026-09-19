@@ -89,6 +89,7 @@
     state.status = el('div'); state.status.id = 'ai-subtitle-status'; state.status.hidden = true;
     document.body.append(state.chooser, state.panel, state.status);
     state.panel.style.fontSize = `${state.fontSize || 16}px`;
+    state.panel.style.setProperty('--ai-subtitle-bg-opacity', String(state.backgroundOpacity || 0.55));
     applyGeometry(); bindVideo();
     new ResizeObserver(entries => {
       const rect = entries[0]?.contentRect;
@@ -289,6 +290,11 @@
         state.fontSize = Math.max(14, Math.min(40, value));
         state.panel.style.fontSize = `${state.fontSize}px`;
       }
+      const opacity = Number(request.config?.backgroundOpacity);
+      if (Number.isFinite(opacity) && state.panel) {
+        state.backgroundOpacity = Math.max(0.2, Math.min(0.9, opacity));
+        state.panel.style.setProperty('--ai-subtitle-bg-opacity', String(state.backgroundOpacity));
+      }
       respond({ success: true });
     }
     return true;
@@ -297,6 +303,7 @@
     const stored = await chrome.storage.local.get(['subtitleCoordinates', 'subtitleSize', 'fontSize']);
     state.dragPosition = stored.subtitleCoordinates || null; state.size = stored.subtitleSize || null;
     state.fontSize = Math.max(14, Math.min(40, Number(stored.fontSize || 20)));
+    state.backgroundOpacity = Math.max(0.2, Math.min(0.9, Number(stored.backgroundOpacity || 0.55)));
   }
   let lastUrl = location.href;
   setInterval(() => { if (location.href !== lastUrl) { lastUrl = location.href; if (/\/video\//.test(location.pathname)) setTimeout(init, 700); } }, 700);

@@ -228,6 +228,15 @@
         <option value="custom">自定义</option>
       </select>
     </div>
+
+    <div class="form-group">
+      <label for="backgroundOpacity">字幕背景透明度</label>
+      <div class="range-row">
+        <input type="range" id="backgroundOpacity" min="20" max="90" step="5" value="55">
+        <output id="backgroundOpacityValue" class="range-value" for="backgroundOpacity">55%</output>
+      </div>
+      <div class="hint">透明度越低越不遮挡画面，文字仍保留阴影</div>
+    </div>
   </div>
   
   <button class="btn" id="saveBtn">💾 保存设置</button>

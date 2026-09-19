@@ -8,6 +8,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const fontSize = document.getElementById('fontSize');
   const fontSizeValue = document.getElementById('fontSizeValue');
   const position = document.getElementById('position');
+  const backgroundOpacity = document.getElementById('backgroundOpacity');
+  const backgroundOpacityValue = document.getElementById('backgroundOpacityValue');
   const status = document.getElementById('status');
   const modelHint = document.getElementById('modelHint');
   
@@ -32,7 +34,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 加载保存的配置
   const result = await chrome.storage.local.get([
-    'apiKey', 'baseUrl', 'provider', 'model', 'prompt', 'fontSize', 'position'
+    'apiKey', 'baseUrl', 'provider', 'model', 'prompt', 'fontSize', 'position', 'backgroundOpacity'
   ]);
   
   if (result.provider) provider.value = result.provider;
@@ -42,12 +44,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (result.prompt) prompt.value = result.prompt;
   if (result.fontSize) fontSize.value = String(Math.max(14, Math.min(40, Number(result.fontSize))));
   if (result.position) position.value = result.position;
+  if (result.backgroundOpacity) backgroundOpacity.value = String(Math.max(20, Math.min(90, Number(result.backgroundOpacity))));
   updateFontSizeLabel();
+  updateBackgroundOpacityLabel();
 
   fontSize.addEventListener('input', updateFontSizeLabel);
+  backgroundOpacity.addEventListener('input', updateBackgroundOpacityLabel);
 
   function updateFontSizeLabel() {
     fontSizeValue.textContent = `${fontSize.value}px`;
+  }
+
+  function updateBackgroundOpacityLabel() {
+    backgroundOpacityValue.textContent = `${backgroundOpacity.value}%`;
   }
   
   updateModelHint(provider.value);
@@ -115,7 +124,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         model: model.value,
         prompt: prompt.value,
         fontSize: fontSize.value,
-        position: position.value
+        position: position.value,
+        backgroundOpacity: backgroundOpacity.value
       });
       
       // 通知content script更新配置
@@ -125,7 +135,8 @@ document.addEventListener('DOMContentLoaded', async () => {
           action: 'updateConfig',
           config: {
             fontSize: parseInt(fontSize.value),
-            subtitlePosition: position.value
+            subtitlePosition: position.value,
+            backgroundOpacity: parseInt(backgroundOpacity.value, 10) / 100
           }
         });
       }
