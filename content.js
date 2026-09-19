@@ -2,7 +2,7 @@
   'use strict';
 
   const CACHE_PREFIX = 'subtitleCache:';
-  const PREVIOUS_LINES = 1;
+  const PREVIOUS_LINES = 0;
   const state = {
     bvid: '', page: 1, cacheBase: '', video: null, subtitles: [], generation: 0,
     currentIndex: -2, frame: 0, panel: null, body: null, status: null, chooser: null,
@@ -240,7 +240,7 @@
     state.body.replaceChildren();
     if (center < 0) return state.panel.classList.add('ai-subtitle-no-cue');
     state.panel.classList.remove('ai-subtitle-no-cue', 'ai-subtitle-hidden');
-    // Keep the overlay compact: show only the previous cue and the active cue.
+    // Keep the overlay focused: show only the active cue.
     const start = Math.max(0, center - PREVIOUS_LINES), end = center;
     for (let i = start; i <= end; i++) {
       const item = state.subtitles[i], line = el('div', `subtitle-line${i === center ? ' subtitle-current' : ''}`);
@@ -248,6 +248,20 @@
       if (item.translation) line.append(el('div', 'subtitle-translation', item.translation));
       state.body.append(line);
     }
+    fitSubtitleText();
+  }
+
+  function fitSubtitleText() {
+    if (!state.body) return;
+    const available = Math.max(120, state.body.clientWidth - 28);
+    state.body.querySelectorAll('.subtitle-line').forEach(line => {
+      let size = Number(state.fontSize || 20);
+      line.style.fontSize = `${size}px`;
+      while (line.scrollWidth > available && size > 12) {
+        size -= 1;
+        line.style.fontSize = `${size}px`;
+      }
+    });
   }
 
   function showChooser() { state.chooser.hidden = false; }
@@ -305,7 +319,7 @@
     state.dragPosition = stored.subtitleCoordinates || null;
     const savedSize = stored.subtitleSize;
     state.size = savedSize ? {
-      width: Number(savedSize.width) || 680,
+      width: Math.max(Number(savedSize.width) || 0, Math.min(Math.round(innerWidth * 0.96), 1200)),
       // Migrate the old tall panel to the compact two-line layout.
       height: Math.min(Number(savedSize.height) || 124, 124),
     } : null;

@@ -53,8 +53,8 @@
   left: 50%;
   bottom: 68px;
   transform: translateX(-50%);
-  width: min(680px, 72vw);
-  height: 124px;
+  width: min(1200px, 96vw);
+  height: 112px;
   min-width: 280px;
   min-height: 116px;
   max-width: 96vw;
@@ -68,7 +68,6 @@
   text-align: center;
   text-shadow: 0 1px 3px #000;
   box-shadow: none;
-  backdrop-filter: blur(2px);
 }
 
 #ai-subtitle-container:hover {
@@ -111,20 +110,29 @@
 }
 #ai-subtitle-container .ai-subtitle-body {
   height: 100%;
-  overflow-y: auto;
+  overflow: hidden;
   padding: 8px 14px 10px;
   box-sizing: border-box;
   scrollbar-width: thin;
 }
 #ai-subtitle-container .subtitle-line {
   padding: 4px 0;
-  opacity: 0.38;
-  font-size: 0.875em;
-  line-height: 1.35;
+  opacity: 0.82;
+  font-size: 20px;
+  line-height: 1.4;
+  font-weight: 600;
+  white-space: nowrap;
+  text-shadow: 0 2px 2px #000, 0 0 2px #000, 0 0 5px rgba(0, 0, 0, 0.95);
 }
-#ai-subtitle-container .subtitle-current { opacity: 1; font-size: 1em; }
-#ai-subtitle-container .subtitle-original { font-weight: 600; }
-#ai-subtitle-container .subtitle-translation { margin-top: 2px; color: #ffd96b; font-size: 0.9em; }
+#ai-subtitle-container .subtitle-current { opacity: 1; font-size: 20px; font-weight: 700; }
+#ai-subtitle-container .subtitle-original { font-weight: 700; }
+#ai-subtitle-container .subtitle-translation {
+  margin-top: 2px;
+  color: #ffe37a;
+  font-size: 0.94em;
+  font-weight: 700;
+  text-shadow: 0 2px 2px #000, 0 0 2px #000, 0 0 5px rgba(0, 0, 0, 0.95);
+}
 
 #ai-subtitle-status {
   top: 58px;
@@ -156,5 +164,5 @@
 @media (max-width: 760px) {
   #ai-subtitle-chooser { flex-wrap: wrap; justify-content: center; }
   #ai-subtitle-chooser .ai-record-select { width: 180px; }
-  #ai-subtitle-container { width: 90vw; height: 180px; }
+  #ai-subtitle-container { width: 96vw; height: 104px; }
 }
