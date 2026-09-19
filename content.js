@@ -2,7 +2,7 @@
   'use strict';
 
   const CACHE_PREFIX = 'subtitleCache:';
-  const CONTEXT_RADIUS = 1;
+  const PREVIOUS_LINES = 1;
   const state = {
     bvid: '', page: 1, cacheBase: '', video: null, subtitles: [], generation: 0,
     currentIndex: -2, frame: 0, panel: null, body: null, status: null, chooser: null,
@@ -240,7 +240,8 @@
     state.body.replaceChildren();
     if (center < 0) return state.panel.classList.add('ai-subtitle-no-cue');
     state.panel.classList.remove('ai-subtitle-no-cue', 'ai-subtitle-hidden');
-    const start = Math.max(0, center - CONTEXT_RADIUS), end = Math.min(state.subtitles.length - 1, center + CONTEXT_RADIUS);
+    // Keep the overlay compact: show only the previous cue and the active cue.
+    const start = Math.max(0, center - PREVIOUS_LINES), end = center;
     for (let i = start; i <= end; i++) {
       const item = state.subtitles[i], line = el('div', `subtitle-line${i === center ? ' subtitle-current' : ''}`);
       line.append(el('div', 'subtitle-original', item.content || ''));
@@ -301,7 +302,13 @@
   });
   async function loadPreferences() {
     const stored = await chrome.storage.local.get(['subtitleCoordinates', 'subtitleSize', 'fontSize']);
-    state.dragPosition = stored.subtitleCoordinates || null; state.size = stored.subtitleSize || null;
+    state.dragPosition = stored.subtitleCoordinates || null;
+    const savedSize = stored.subtitleSize;
+    state.size = savedSize ? {
+      width: Number(savedSize.width) || 680,
+      // Migrate the old tall panel to the compact two-line layout.
+      height: Math.min(Number(savedSize.height) || 124, 124),
+    } : null;
     state.fontSize = Math.max(14, Math.min(40, Number(stored.fontSize || 20)));
     state.backgroundOpacity = Math.max(0.2, Math.min(0.9, Number(stored.backgroundOpacity || 0.55)));
   }
