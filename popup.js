@@ -6,6 +6,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const model = document.getElementById('model');
   const prompt = document.getElementById('prompt');
   const fontSize = document.getElementById('fontSize');
+  const fontSizeValue = document.getElementById('fontSizeValue');
   const position = document.getElementById('position');
   const status = document.getElementById('status');
   const modelHint = document.getElementById('modelHint');
@@ -39,8 +40,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (result.apiKey) apiKey.value = result.apiKey;
   if (result.model) model.value = result.model;
   if (result.prompt) prompt.value = result.prompt;
-  if (result.fontSize) fontSize.value = result.fontSize;
+  if (result.fontSize) fontSize.value = String(Math.max(14, Math.min(40, Number(result.fontSize))));
   if (result.position) position.value = result.position;
+  updateFontSizeLabel();
+
+  fontSize.addEventListener('input', updateFontSizeLabel);
+
+  function updateFontSizeLabel() {
+    fontSizeValue.textContent = `${fontSize.value}px`;
+  }
   
   updateModelHint(provider.value);
 

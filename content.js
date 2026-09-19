@@ -284,7 +284,11 @@
   chrome.runtime.onMessage.addListener((request, sender, respond) => {
     if (request.action === 'reloadSubtitles') { init(); respond({ success: true }); }
     else if (request.action === 'updateConfig') {
-      if (request.config?.fontSize && state.panel) state.panel.style.fontSize = `${request.config.fontSize}px`;
+      const value = Number(request.config?.fontSize);
+      if (Number.isFinite(value) && state.panel) {
+        state.fontSize = Math.max(14, Math.min(40, value));
+        state.panel.style.fontSize = `${state.fontSize}px`;
+      }
       respond({ success: true });
     }
     return true;
@@ -292,7 +296,7 @@
   async function loadPreferences() {
     const stored = await chrome.storage.local.get(['subtitleCoordinates', 'subtitleSize', 'fontSize']);
     state.dragPosition = stored.subtitleCoordinates || null; state.size = stored.subtitleSize || null;
-    state.fontSize = Number(stored.fontSize || 16);
+    state.fontSize = Math.max(14, Math.min(40, Number(stored.fontSize || 20)));
   }
   let lastUrl = location.href;
   setInterval(() => { if (location.href !== lastUrl) { lastUrl = location.href; if (/\/video\//.test(location.pathname)) setTimeout(init, 700); } }, 700);

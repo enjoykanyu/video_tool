@@ -116,6 +116,25 @@
       color: #666;
       margin-top: 4px;
     }
+    .range-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .range-row input[type="range"] {
+      flex: 1;
+      accent-color: #00a1d6;
+    }
+    .range-value {
+      min-width: 52px;
+      padding: 5px 7px;
+      border: 1px solid #444;
+      border-radius: 5px;
+      background: #2a2a2a;
+      color: #fff;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
     .provider-info {
       font-size: 11px;
       color: #666;
@@ -194,12 +213,11 @@
     
     <div class="form-group">
       <label for="fontSize">字幕字号</label>
-      <select id="fontSize">
-        <option value="14">小 (14px)</option>
-        <option value="16" selected>中 (16px)</option>
-        <option value="20">大 (20px)</option>
-        <option value="24">超大 (24px)</option>
-      </select>
+      <div class="range-row">
+        <input type="range" id="fontSize" min="14" max="40" step="1" value="20">
+        <output id="fontSizeValue" class="range-value" for="fontSize">20px</output>
+      </div>
+      <div class="hint">拖动调节，当前行和中英文译文会按比例显示</div>
     </div>
     
     <div class="form-group">
