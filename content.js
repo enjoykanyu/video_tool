@@ -6,7 +6,7 @@
   const state = {
     bvid: '', page: 1, cacheBase: '', video: null, subtitles: [], generation: 0,
     currentIndex: -2, frame: 0, panel: null, body: null, status: null, chooser: null,
-    recordSelect: null, fileInput: null, dragPosition: null, size: null, resourceUrls: [],
+    recordSelect: null, fileInput: null, dragPosition: null, size: null, resourceUrls: [], ocrOverlay: null,
   };
   const el = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -189,28 +189,67 @@
     state.chooser.hidden = true;
     video.pause();
     try {
+      const crop = await selectOcrRegion(video);
+      if (!crop) throw new Error('已取消区域选择');
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
       for (let time = 0; time < video.duration && run === state.generation; time += interval) {
         video.currentTime = time;
         await waitForSeek(video, time);
-        const result = await chrome.runtime.sendMessage({ action: 'ocrSubtitleFrame', timestamp: time });
+        const result = await chrome.runtime.sendMessage({ action: 'ocrSubtitleFrame', timestamp: time, crop, viewport });
         if (!result?.success) throw new Error(result?.error || 'OCR 请求失败');
         const english = String(result.english || '').trim();
         const chinese = String(result.chinese || '').trim();
         if (english || chinese) samples.push({ from: time, english, chinese });
+        if (samples.length && time > 0 && (Math.round(time / interval) % 4 === 3 || time + interval >= video.duration)) {
+          const partial = buildOcrSubtitles(samples, video.duration, interval);
+          activate(partial, `OCR处理中，已分析 ${Math.min(Math.round(time + interval), Math.round(video.duration))} / ${Math.round(video.duration)} 秒`, false);
+          await chrome.storage.local.set({ [`${state.cacheBase}ocr:running`]: makeRecord(partial, 'ocr', { fileName: 'OCR画面字幕（处理中）.srt' }) });
+        }
         showStatus(`OCR识别中 ${Math.min(Math.round(time), Math.round(video.duration))} / ${Math.round(video.duration)} 秒`, 'loading');
       }
       if (!samples.length) throw new Error('画面中没有识别到中英文字幕，请确认字幕清晰且模型支持图片识别');
       const subtitles = buildOcrSubtitles(samples, video.duration, interval);
       const key = `${state.cacheBase}ocr:${Date.now()}`;
       await chrome.storage.local.set({ [key]: makeRecord(subtitles, 'ocr', { fileName: 'OCR画面字幕.srt' }) });
+      await chrome.storage.local.remove(`${state.cacheBase}ocr:running`);
       await refreshRecords();
       activate(subtitles, `OCR完成，共 ${subtitles.length} 条中英字幕`);
     } catch (error) {
+      await chrome.storage.local.remove(`${state.cacheBase}ocr:running`).catch(() => {});
       showStatus(`OCR失败：${error.message}`, 'error');
     } finally {
       video.currentTime = originalTime;
       if (wasPlaying) video.play().catch(() => {});
     }
+  }
+
+  function selectOcrRegion(video) {
+    return new Promise(resolve => {
+      const videoRect = video.getBoundingClientRect();
+      const overlay = el('div', 'ai-ocr-select-overlay');
+      const hint = el('div', 'ai-ocr-select-hint', '拖动圈选字幕区域，松开开始 OCR · Esc 取消');
+      const box = el('div', 'ai-ocr-select-box');
+      overlay.append(hint, box); document.body.append(overlay); state.ocrOverlay = overlay;
+      let start = null;
+      const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+      const point = event => ({ x: clamp(event.clientX, videoRect.left, videoRect.right), y: clamp(event.clientY, videoRect.top, videoRect.bottom) });
+      const move = event => {
+        if (!start) return;
+        const end = point(event), rect = { left: Math.min(start.x, end.x), top: Math.min(start.y, end.y), right: Math.max(start.x, end.x), bottom: Math.max(start.y, end.y) };
+        box.style.left = `${rect.left}px`; box.style.top = `${rect.top}px`; box.style.width = `${rect.right - rect.left}px`; box.style.height = `${rect.bottom - rect.top}px`;
+      };
+      const finish = value => {
+        overlay.remove(); state.ocrOverlay = null; removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('keydown', cancel); resolve(value);
+      };
+      const up = event => {
+        if (!start) return;
+        const end = point(event), left = Math.min(start.x, end.x), top = Math.min(start.y, end.y), width = Math.abs(end.x - start.x), height = Math.abs(end.y - start.y);
+        finish(width < 30 || height < 12 ? null : { x: left, y: top, width, height });
+      };
+      const cancel = event => { if (event.key === 'Escape') finish(null); };
+      overlay.addEventListener('pointerdown', event => { start = point(event); move(event); });
+      addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('keydown', cancel);
+    });
   }
 
   function waitForSeek(video, target) {

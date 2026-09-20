@@ -238,11 +238,28 @@ async function callOpenAICompatible(prompt, config) {
   return content;
 }
 
-async function ocrSubtitleFrame(timestamp, sender) {
+async function cropScreenshot(dataUrl, crop, viewport) {
+  if (!crop || !viewport?.width || !viewport?.height) return dataUrl;
+  const response = await fetch(dataUrl);
+  const bitmap = await createImageBitmap(await response.blob());
+  const scaleX = bitmap.width / Number(viewport.width), scaleY = bitmap.height / Number(viewport.height);
+  const sx = Math.max(0, Math.round(Number(crop.x) * scaleX)), sy = Math.max(0, Math.round(Number(crop.y) * scaleY));
+  const sw = Math.max(1, Math.min(bitmap.width - sx, Math.round(Number(crop.width) * scaleX)));
+  const sh = Math.max(1, Math.min(bitmap.height - sy, Math.round(Number(crop.height) * scaleY)));
+  const canvas = new OffscreenCanvas(sw, sh);
+  canvas.getContext('2d').drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh); bitmap.close();
+  const blob = await canvas.convertToBlob({ type: 'image/png' }), bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  return `data:image/png;base64,${btoa(binary)}`;
+}
+
+async function ocrSubtitleFrame(timestamp, sender, crop, viewport) {
   const config = await getConfig();
   if (!config.apiKey) throw new Error('未配置 API Key，请先在扩展设置中填写');
   if (!sender?.tab?.windowId) throw new Error('无法定位当前视频标签页');
-  const image = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: 'png' });
+  const screenshot = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: 'png' });
+  const image = await cropScreenshot(screenshot, crop, viewport);
   const response = await fetch(`${config.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
@@ -251,7 +268,7 @@ async function ocrSubtitleFrame(timestamp, sender) {
       messages: [
         { role: 'system', content: 'You are a subtitle OCR engine. Output pure JSON only.' },
         { role: 'user', content: [
-          { type: 'text', text: `识别截图中视频画面里的字幕。只返回 JSON，不要解释：{"english":"英文字幕原文，没有则为空","chinese":"对应的简体中文，没有则为空"}。忽略页面按钮、标题和其他文字，只识别视频底部字幕。当前视频时间约 ${Number(timestamp || 0).toFixed(1)} 秒。` },
+          { type: 'text', text: `识别这块已经裁剪好的字幕区域。只返回 JSON，不要解释：{"english":"英文字幕原文，没有则为空","chinese":"对应的简体中文，没有则为空"}。不要猜测图片外的文字；如果没有清晰字幕就返回空字符串。当前视频时间约 ${Number(timestamp || 0).toFixed(1)} 秒。` },
           { type: 'image_url', image_url: { url: image } },
         ] },
       ],
@@ -322,7 +339,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       } else if (request.action === 'testConnection') {
         sendResponse({ success: await testConnection(await getConfig(request.config || {})) });
       } else if (request.action === 'ocrSubtitleFrame') {
-        sendResponse({ success: true, ...(await ocrSubtitleFrame(request.timestamp, sender)) });
+        sendResponse({ success: true, ...(await ocrSubtitleFrame(request.timestamp, sender, request.crop, request.viewport)) });
       }
     } catch (error) {
       sendResponse({ success: false, error: error.message });
