@@ -238,6 +238,38 @@ async function callOpenAICompatible(prompt, config) {
   return content;
 }
 
+async function ocrSubtitleFrame(timestamp, sender) {
+  const config = await getConfig();
+  if (!config.apiKey) throw new Error('未配置 API Key，请先在扩展设置中填写');
+  if (!sender?.tab?.windowId) throw new Error('无法定位当前视频标签页');
+  const image = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: 'png' });
+  const response = await fetch(`${config.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+    body: JSON.stringify({
+      model: config.model,
+      messages: [
+        { role: 'system', content: 'You are a subtitle OCR engine. Output pure JSON only.' },
+        { role: 'user', content: [
+          { type: 'text', text: `识别截图中视频画面里的字幕。只返回 JSON，不要解释：{"english":"英文字幕原文，没有则为空","chinese":"对应的简体中文，没有则为空"}。忽略页面按钮、标题和其他文字，只识别视频底部字幕。当前视频时间约 ${Number(timestamp || 0).toFixed(1)} 秒。` },
+          { type: 'image_url', image_url: { url: image } },
+        ] },
+      ],
+      temperature: 0,
+      max_tokens: 500,
+    }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(`OCR API错误 ${response.status}: ${error.error?.message || response.statusText}`);
+  }
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) throw new Error('OCR 返回空内容，请确认模型支持图片输入');
+  const parsed = parseModelJson(content);
+  return { english: parsed?.english || '', chinese: parsed?.chinese || '' };
+}
+
 function parseModelJson(content) {
   const cleaned = String(content)
     .replace(/^```(?:json)?\s*/i, '')
@@ -289,6 +321,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ success: true });
       } else if (request.action === 'testConnection') {
         sendResponse({ success: await testConnection(await getConfig(request.config || {})) });
+      } else if (request.action === 'ocrSubtitleFrame') {
+        sendResponse({ success: true, ...(await ocrSubtitleFrame(request.timestamp, sender)) });
       }
     } catch (error) {
       sendResponse({ success: false, error: error.message });

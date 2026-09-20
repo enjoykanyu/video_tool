@@ -75,6 +75,7 @@
       state.recordSelect,
       button('加载记录', '直接播放缓存，不调用模型', loadSelectedRecord),
       button('提取英文并翻译', '读取当前分P英文 CC 并翻译', extractOnline),
+      button('OCR提取硬字幕', '识别视频画面中已有的中英文硬字幕并生成 SRT', ocrVideoSubtitles),
       button('×', '关闭来源选择', () => { state.chooser.hidden = true; }, 'icon-button'),
       state.fileInput
     );
@@ -107,7 +108,8 @@
       const option = el('option', '', '无当前分P记录'); option.disabled = true; option.selected = true; state.recordSelect.append(option); return;
     }
     for (const [key, record] of records) {
-      const option = el('option', '', `${record.source === 'import' ? '导入' : '在线'} · ${record.fileName || record.part || ''} · ${record.subtitles.length} 条`);
+      const sourceName = record.source === 'import' ? '导入' : record.source === 'ocr' ? 'OCR' : '在线';
+      const option = el('option', '', `${sourceName} · ${record.fileName || record.part || ''} · ${record.subtitles.length} 条`);
       option.value = key; state.recordSelect.append(option);
     }
   }
@@ -174,6 +176,66 @@
       activate(state.subtitles, `已提取英文 ${state.subtitles.length} 条，开始翻译…`, false);
       await translateAll(result, run);
     } catch (error) { showStatus(`英文字幕提取失败：${error.message}`, 'error'); }
+  }
+
+  async function ocrVideoSubtitles() {
+    const run = state.generation;
+    const video = state.video;
+    if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return showStatus('视频时长不可用，暂时无法 OCR', 'error');
+    const wasPlaying = !video.paused;
+    const originalTime = video.currentTime;
+    const interval = 2.5;
+    const samples = [];
+    state.chooser.hidden = true;
+    video.pause();
+    try {
+      for (let time = 0; time < video.duration && run === state.generation; time += interval) {
+        video.currentTime = time;
+        await waitForSeek(video, time);
+        const result = await chrome.runtime.sendMessage({ action: 'ocrSubtitleFrame', timestamp: time });
+        if (!result?.success) throw new Error(result?.error || 'OCR 请求失败');
+        const english = String(result.english || '').trim();
+        const chinese = String(result.chinese || '').trim();
+        if (english || chinese) samples.push({ from: time, english, chinese });
+        showStatus(`OCR识别中 ${Math.min(Math.round(time), Math.round(video.duration))} / ${Math.round(video.duration)} 秒`, 'loading');
+      }
+      if (!samples.length) throw new Error('画面中没有识别到中英文字幕，请确认字幕清晰且模型支持图片识别');
+      const subtitles = buildOcrSubtitles(samples, video.duration, interval);
+      const key = `${state.cacheBase}ocr:${Date.now()}`;
+      await chrome.storage.local.set({ [key]: makeRecord(subtitles, 'ocr', { fileName: 'OCR画面字幕.srt' }) });
+      await refreshRecords();
+      activate(subtitles, `OCR完成，共 ${subtitles.length} 条中英字幕`);
+    } catch (error) {
+      showStatus(`OCR失败：${error.message}`, 'error');
+    } finally {
+      video.currentTime = originalTime;
+      if (wasPlaying) video.play().catch(() => {});
+    }
+  }
+
+  function waitForSeek(video, target) {
+    if (Math.abs(video.currentTime - target) < 0.08) return Promise.resolve();
+    return new Promise(resolve => {
+      const done = () => { video.removeEventListener('seeked', done); resolve(); };
+      video.addEventListener('seeked', done, { once: true });
+      setTimeout(done, 1800);
+    });
+  }
+
+  function buildOcrSubtitles(samples, duration, interval) {
+    const result = [];
+    for (const sample of samples) {
+      const content = sample.english || sample.chinese;
+      const translation = sample.english ? sample.chinese : '';
+      if (!content) continue;
+      const last = result.at(-1);
+      if (last && last.content === content && last.translation === translation) {
+        last.to = Math.min(duration, sample.from + interval);
+      } else {
+        result.push({ from: sample.from, to: Math.min(duration, sample.from + interval), content, translation });
+      }
+    }
+    return result.filter(item => item.to > item.from);
   }
 
   async function findPlayerLoadedSubtitles() {
