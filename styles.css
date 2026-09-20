@@ -15,6 +15,7 @@
   cursor: crosshair;
   background: rgba(0, 0, 0, 0.16);
   user-select: none;
+  touch-action: none;
 }
 .ai-ocr-select-hint {
   position: fixed;

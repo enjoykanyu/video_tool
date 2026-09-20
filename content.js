@@ -75,6 +75,7 @@
       state.recordSelect,
       button('加载记录', '直接播放缓存，不调用模型', loadSelectedRecord),
       button('提取英文并翻译', '读取当前分P英文 CC 并翻译', extractOnline),
+      button('语音识别英文', '播放完整视频并从音频提取带时间轴的英文字幕', transcribeVideoAudio),
       button('OCR提取硬字幕', '识别视频画面中已有的中英文硬字幕并生成 SRT', ocrVideoSubtitles),
       button('×', '关闭来源选择', () => { state.chooser.hidden = true; }, 'icon-button'),
       state.fileInput
@@ -108,7 +109,7 @@
       const option = el('option', '', '无当前分P记录'); option.disabled = true; option.selected = true; state.recordSelect.append(option); return;
     }
     for (const [key, record] of records) {
-      const sourceName = record.source === 'import' ? '导入' : record.source === 'ocr' ? 'OCR' : '在线';
+      const sourceName = record.source === 'import' ? '导入' : record.source === 'ocr' ? 'OCR' : record.source === 'asr' ? '语音识别' : '在线';
       const option = el('option', '', `${sourceName} · ${record.fileName || record.part || ''} · ${record.subtitles.length} 条`);
       option.value = key; state.recordSelect.append(option);
     }
@@ -178,6 +179,33 @@
     } catch (error) { showStatus(`英文字幕提取失败：${error.message}`, 'error'); }
   }
 
+  async function transcribeVideoAudio() {
+    const video = state.video;
+    if (!video?.captureStream || !Number.isFinite(video.duration) || video.duration <= 0) return showStatus('当前浏览器不支持音频捕获或视频时长不可用', 'error');
+    const originalTime = video.currentTime, wasPlaying = !video.paused;
+    state.chooser.hidden = true; video.pause(); video.currentTime = 0;
+    try {
+      const stream = video.captureStream(), audioTracks = stream.getAudioTracks();
+      if (!audioTracks.length) throw new Error('当前视频没有可捕获的音轨');
+      const mimeType = ['audio/webm;codecs=opus', 'audio/webm'].find(type => MediaRecorder.isTypeSupported(type));
+      if (!mimeType) throw new Error('当前浏览器不支持 WebM 音频录制');
+      const recorder = new MediaRecorder(new MediaStream(audioTracks), { mimeType });
+      const chunks = [];
+      recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+      const finished = new Promise((resolve, reject) => { recorder.onstop = () => resolve(new Blob(chunks, { type: 'audio/webm' })); recorder.onerror = () => reject(new Error('音频录制失败')); });
+      const ended = new Promise(resolve => video.addEventListener('ended', resolve, { once: true }));
+      recorder.start(1000); await video.play();
+      const update = () => showStatus(`正在提取音频 ${Math.min(Math.round(video.currentTime), Math.round(video.duration))} / ${Math.round(video.duration)} 秒`, 'loading');
+      video.addEventListener('timeupdate', update); await ended; video.removeEventListener('timeupdate', update); recorder.stop();
+      const audio = await finished;
+      showStatus('音频提取完成，正在识别英文时间轴…', 'loading');
+      const result = await chrome.runtime.sendMessage({ action: 'transcribeAudio', audio });
+      if (!result?.success || !result.subtitles?.length) throw new Error(result?.error || '语音识别失败');
+      state.subtitles = result.subtitles; activate(state.subtitles, `英文识别完成，共 ${state.subtitles.length} 条，开始翻译…`, false); await translateAll({ source: 'asr', fileName: '语音识别英文.srt' }, state.generation);
+    } catch (error) { showStatus(`语音识别失败：${error.message}`, 'error'); }
+    finally { video.currentTime = originalTime; if (wasPlaying) video.play().catch(() => {}); }
+  }
+
   async function ocrVideoSubtitles() {
     const run = state.generation;
     const video = state.video;
@@ -189,6 +217,7 @@
     state.chooser.hidden = true;
     video.pause();
     try {
+      showStatus('请在视频画面上拖动圈选字幕区域，松开后开始 OCR', 'loading');
       const crop = await selectOcrRegion(video);
       if (!crop) throw new Error('已取消区域选择');
       const viewport = { width: window.innerWidth, height: window.innerHeight };
@@ -229,7 +258,7 @@
       const overlay = el('div', 'ai-ocr-select-overlay');
       const hint = el('div', 'ai-ocr-select-hint', '拖动圈选字幕区域，松开开始 OCR · Esc 取消');
       const box = el('div', 'ai-ocr-select-box');
-      overlay.append(hint, box); document.body.append(overlay); state.ocrOverlay = overlay;
+      overlay.append(hint, box); (document.fullscreenElement || document.body).append(overlay); state.ocrOverlay = overlay;
       let start = null;
       const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
       const point = event => ({ x: clamp(event.clientX, videoRect.left, videoRect.right), y: clamp(event.clientY, videoRect.top, videoRect.bottom) });
@@ -247,7 +276,7 @@
         finish(width < 30 || height < 12 ? null : { x: left, y: top, width, height });
       };
       const cancel = event => { if (event.key === 'Escape') finish(null); };
-      overlay.addEventListener('pointerdown', event => { start = point(event); move(event); });
+      overlay.addEventListener('pointerdown', event => { event.preventDefault(); start = point(event); move(event); });
       addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('keydown', cancel);
     });
   }
@@ -297,17 +326,18 @@
   }
 
   async function translateAll(meta, run) {
+    const recordKey = `${state.cacheBase}${meta?.source || 'online'}`;
     for (let start = 0; start < state.subtitles.length; start += 40) {
       if (run !== state.generation) return;
-      const context = state.subtitles.slice(Math.max(0, start - 40), Math.min(state.subtitles.length, start + 80)).map(item => item.content).join('\n');
+      const context = state.subtitles.map(item => item.content).join('\n').slice(0, 12000);
       const response = await chrome.runtime.sendMessage({ action: 'translateSubtitles', direction: 'en2zh', fullContext: context, subtitles: state.subtitles.slice(start, start + 40) });
       if (!response?.success || response.translations?.length !== Math.min(40, state.subtitles.length - start)) {
-        await chrome.storage.local.set({ [`${state.cacheBase}online`]: makeRecord(state.subtitles, 'online', meta) });
+        await chrome.storage.local.set({ [recordKey]: makeRecord(state.subtitles, meta?.source || 'online', meta) });
         throw new Error(response?.error || '翻译返回数量不正确');
       }
       state.subtitles.splice(start, response.translations.length, ...response.translations);
       state.currentIndex = -2; update(); showStatus(`翻译中 ${Math.min(start + 40, state.subtitles.length)} / ${state.subtitles.length}`, 'loading');
-      await chrome.storage.local.set({ [`${state.cacheBase}online`]: makeRecord(state.subtitles, 'online', meta) });
+      await chrome.storage.local.set({ [recordKey]: makeRecord(state.subtitles, meta?.source || 'online', meta) });
     }
     await refreshRecords(); showStatus(`英文提取与翻译完成，共 ${state.subtitles.length} 条`, 'success');
   }

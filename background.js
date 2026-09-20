@@ -287,6 +287,20 @@ async function ocrSubtitleFrame(timestamp, sender, crop, viewport) {
   return { english: parsed?.english || '', chinese: parsed?.chinese || '' };
 }
 
+async function transcribeAudio(audio, config) {
+  if (!config.apiKey) throw new Error('未配置 API Key，请先在扩展设置中填写');
+  const model = config.provider === 'openai' ? 'whisper-1' : 'qwen-audio-turbo';
+  const form = new FormData();
+  form.append('file', new Blob([audio], { type: 'audio/webm' }), 'video-audio.webm');
+  form.append('model', model); form.append('language', 'en'); form.append('response_format', 'verbose_json');
+  const response = await fetch(`${config.baseUrl}/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}` }, body: form });
+  if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(`语音识别 API错误 ${response.status}: ${error.error?.message || response.statusText}`); }
+  const data = await response.json();
+  const segments = Array.isArray(data.segments) ? data.segments : [];
+  if (!segments.length) throw new Error('语音识别没有返回带时间轴的英文片段');
+  return segments.map(item => ({ from: Number(item.start), to: Number(item.end), content: String(item.text || '').trim(), translation: '' })).filter(item => item.content && item.to > item.from);
+}
+
 function parseModelJson(content) {
   const cleaned = String(content)
     .replace(/^```(?:json)?\s*/i, '')
@@ -340,6 +354,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ success: await testConnection(await getConfig(request.config || {})) });
       } else if (request.action === 'ocrSubtitleFrame') {
         sendResponse({ success: true, ...(await ocrSubtitleFrame(request.timestamp, sender, request.crop, request.viewport)) });
+      } else if (request.action === 'transcribeAudio') {
+        sendResponse({ success: true, subtitles: await transcribeAudio(request.audio, await getConfig()) });
       }
     } catch (error) {
       sendResponse({ success: false, error: error.message });
