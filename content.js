@@ -182,28 +182,52 @@
   async function transcribeVideoAudio() {
     const video = state.video;
     if (!video?.captureStream || !Number.isFinite(video.duration) || video.duration <= 0) return showStatus('当前浏览器不支持音频捕获或视频时长不可用', 'error');
-    const originalTime = video.currentTime, wasPlaying = !video.paused;
-    state.chooser.hidden = true; video.pause(); video.currentTime = 0;
+    const originalTime = video.currentTime, wasPlaying = !video.paused, run = state.generation;
+    const segmentSeconds = 10;
+    state.chooser.hidden = true; video.pause(); video.currentTime = 0; state.subtitles = [];
     try {
       const stream = video.captureStream(), audioTracks = stream.getAudioTracks();
       if (!audioTracks.length) throw new Error('当前视频没有可捕获的音轨');
       const mimeType = ['audio/webm;codecs=opus', 'audio/webm'].find(type => MediaRecorder.isTypeSupported(type));
       if (!mimeType) throw new Error('当前浏览器不支持 WebM 音频录制');
-      const recorder = new MediaRecorder(new MediaStream(audioTracks), { mimeType });
-      const chunks = [];
-      recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-      const finished = new Promise((resolve, reject) => { recorder.onstop = () => resolve(new Blob(chunks, { type: 'audio/webm' })); recorder.onerror = () => reject(new Error('音频录制失败')); });
-      const ended = new Promise(resolve => video.addEventListener('ended', resolve, { once: true }));
-      recorder.start(1000); await video.play();
-      const update = () => showStatus(`正在提取音频 ${Math.min(Math.round(video.currentTime), Math.round(video.duration))} / ${Math.round(video.duration)} 秒`, 'loading');
-      video.addEventListener('timeupdate', update); await ended; video.removeEventListener('timeupdate', update); recorder.stop();
-      const audio = await finished;
-      showStatus('音频提取完成，正在识别英文时间轴…', 'loading');
-      const result = await chrome.runtime.sendMessage({ action: 'transcribeAudio', audio });
-      if (!result?.success || !result.subtitles?.length) throw new Error(result?.error || '语音识别失败');
-      state.subtitles = result.subtitles; activate(state.subtitles, `英文识别完成，共 ${state.subtitles.length} 条，开始翻译…`, false); await translateAll({ source: 'asr', fileName: '语音识别英文.srt' }, state.generation);
+      const audioStream = new MediaStream(audioTracks);
+      for (let segmentStart = 0; segmentStart < video.duration && run === state.generation;) {
+        const segmentEnd = Math.min(video.duration, segmentStart + segmentSeconds);
+        const recorder = new MediaRecorder(audioStream, { mimeType });
+        const chunks = [];
+        recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+        const finished = new Promise((resolve, reject) => { recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType })); recorder.onerror = () => reject(new Error('音频录制失败')); });
+        const reached = waitForVideoTime(video, segmentEnd);
+        recorder.start(); await video.play(); await reached; video.pause(); recorder.stop();
+        const audio = await finished;
+        showStatus(`正在识别 ${Math.round(segmentStart)}–${Math.round(segmentEnd)} 秒，并结合上下文翻译…`, 'loading');
+        const result = await chrome.runtime.sendMessage({ action: 'transcribeAudio', audio });
+        if (!result?.success) throw new Error(result?.error || '语音识别失败');
+        const detected = (result.subtitles || []).map(item => ({ ...item, from: item.from + segmentStart, to: item.to + segmentStart }));
+        if (detected.length) {
+          const context = [...state.subtitles, ...detected].map(item => item.content).join('\n').slice(-12000);
+          const translated = await chrome.runtime.sendMessage({ action: 'translateSubtitles', direction: 'en2zh', fullContext: context, subtitles: detected });
+          if (!translated?.success) throw new Error(translated?.error || '翻译失败');
+          state.subtitles.push(...translated.translations);
+          state.subtitles.sort((a, b) => a.from - b.from);
+          activate(state.subtitles, `已生成 ${state.subtitles.length} 条双语字幕，进度 ${Math.round(segmentEnd)} / ${Math.round(video.duration)} 秒`, false);
+          await chrome.storage.local.set({ [`${state.cacheBase}asr`]: makeRecord(state.subtitles, 'asr', { fileName: '语音识别英文.srt' }) });
+        }
+        segmentStart = segmentEnd;
+      }
+      if (!state.subtitles.length) throw new Error('没有识别到英文语音');
+      await refreshRecords(); showStatus(`语音识别与翻译完成，共 ${state.subtitles.length} 条`, 'success');
     } catch (error) { showStatus(`语音识别失败：${error.message}`, 'error'); }
     finally { video.currentTime = originalTime; if (wasPlaying) video.play().catch(() => {}); }
+  }
+
+  function waitForVideoTime(video, target) {
+    if (video.currentTime >= target - 0.05) return Promise.resolve();
+    return new Promise(resolve => {
+      const done = () => { video.removeEventListener('timeupdate', check); resolve(); };
+      const check = () => { if (video.currentTime >= target - 0.05) done(); };
+      video.addEventListener('timeupdate', check);
+    });
   }
 
   async function ocrVideoSubtitles() {
@@ -258,10 +282,11 @@
       const overlay = el('div', 'ai-ocr-select-overlay');
       const hint = el('div', 'ai-ocr-select-hint', '拖动圈选字幕区域，松开开始 OCR · Esc 取消');
       const box = el('div', 'ai-ocr-select-box');
+      overlay.style.left = `${videoRect.left}px`; overlay.style.top = `${videoRect.top}px`;
+      overlay.style.width = `${videoRect.width}px`; overlay.style.height = `${videoRect.height}px`;
       overlay.append(hint, box); (document.fullscreenElement || document.body).append(overlay); state.ocrOverlay = overlay;
       let start = null;
-      const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-      const point = event => ({ x: clamp(event.clientX, videoRect.left, videoRect.right), y: clamp(event.clientY, videoRect.top, videoRect.bottom) });
+      const point = event => ({ x: Math.max(0, Math.min(videoRect.width, event.clientX - videoRect.left)), y: Math.max(0, Math.min(videoRect.height, event.clientY - videoRect.top)) });
       const move = event => {
         if (!start) return;
         const end = point(event), rect = { left: Math.min(start.x, end.x), top: Math.min(start.y, end.y), right: Math.max(start.x, end.x), bottom: Math.max(start.y, end.y) };
@@ -276,8 +301,8 @@
         finish(width < 30 || height < 12 ? null : { x: left, y: top, width, height });
       };
       const cancel = event => { if (event.key === 'Escape') finish(null); };
-      overlay.addEventListener('pointerdown', event => { event.preventDefault(); start = point(event); move(event); });
-      addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('keydown', cancel);
+      overlay.addEventListener('pointerdown', event => { event.preventDefault(); start = point(event); overlay.setPointerCapture?.(event.pointerId); move(event); });
+      overlay.addEventListener('pointermove', move); overlay.addEventListener('pointerup', up); addEventListener('keydown', cancel);
     });
   }
 

@@ -233,7 +233,8 @@ async function callOpenAICompatible(prompt, config) {
   }
 
   const data = await response.json();
-  const content = data.choices?.[0]?.message?.content;
+  const rawContent = data.choices?.[0]?.message?.content;
+  const content = Array.isArray(rawContent) ? rawContent.map(item => item.text || '').join('') : rawContent;
   if (!content) throw new Error('API 返回空内容');
   return content;
 }
@@ -281,7 +282,8 @@ async function ocrSubtitleFrame(timestamp, sender, crop, viewport) {
     throw new Error(`OCR API错误 ${response.status}: ${error.error?.message || response.statusText}`);
   }
   const data = await response.json();
-  const content = data.choices?.[0]?.message?.content;
+  const rawContent = data.choices?.[0]?.message?.content;
+  const content = Array.isArray(rawContent) ? rawContent.map(item => item.text || '').join('') : rawContent;
   if (!content) throw new Error('OCR 返回空内容，请确认模型支持图片输入');
   const parsed = parseModelJson(content);
   return { english: parsed?.english || '', chinese: parsed?.chinese || '' };
@@ -289,6 +291,7 @@ async function ocrSubtitleFrame(timestamp, sender, crop, viewport) {
 
 async function transcribeAudio(audio, config) {
   if (!config.apiKey) throw new Error('未配置 API Key，请先在扩展设置中填写');
+  if (config.provider === 'bailian') return transcribeAudioWithQwen(audio, config);
   const model = config.provider === 'openai' ? 'whisper-1' : 'qwen-audio-turbo';
   const form = new FormData();
   form.append('file', new Blob([audio], { type: 'audio/webm' }), 'video-audio.webm');
@@ -299,6 +302,30 @@ async function transcribeAudio(audio, config) {
   const segments = Array.isArray(data.segments) ? data.segments : [];
   if (!segments.length) throw new Error('语音识别没有返回带时间轴的英文片段');
   return segments.map(item => ({ from: Number(item.start), to: Number(item.end), content: String(item.text || '').trim(), translation: '' })).filter(item => item.content && item.to > item.from);
+}
+
+async function transcribeAudioWithQwen(audio, config) {
+  const bytes = new Uint8Array(await new Blob([audio]).arrayBuffer());
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  const response = await fetch(`${config.baseUrl}/chat/completions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+    body: JSON.stringify({
+      model: 'qwen-audio-turbo',
+      messages: [{ role: 'system', content: 'You are an English ASR engine. Output pure JSON only.' }, { role: 'user', content: [
+        { type: 'text', text: '转写这段音频中的英文，只保留英文语音。请返回 JSON 数组，每项包含相对于本片段的 from、to（秒）和 content。没有语音则返回 []。不要解释。' },
+        { type: 'input_audio', input_audio: { data: `data:audio/webm;base64,${btoa(binary)}`, format: 'webm' } },
+      ] }], temperature: 0, max_tokens: 2000,
+    }),
+  });
+  if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(`百炼语音识别 API错误 ${response.status}: ${error.error?.message || response.statusText}`); }
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) throw new Error('百炼语音识别返回空内容');
+  const parsed = parseModelJson(content);
+  const segments = Array.isArray(parsed) ? parsed : parsed?.segments;
+  if (!Array.isArray(segments)) throw new Error('百炼语音识别没有返回时间轴数组');
+  return segments.map(item => ({ from: Number(item.from ?? item.start), to: Number(item.to ?? item.end), content: String(item.content || item.text || '').trim(), translation: '' })).filter(item => item.content && Number.isFinite(item.from) && Number.isFinite(item.to) && item.to > item.from);
 }
 
 function parseModelJson(content) {

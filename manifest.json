@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "B站AI双语字幕",
-  "version": "2.4.0",
+  "version": "2.5.1",
   "description": "为B站视频添加AI生成的中英文对照字幕，支持AI翻译与实时滚动显示",
   "permissions": [
     "storage",
