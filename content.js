@@ -278,22 +278,23 @@
 
   function selectOcrRegion(video) {
     return new Promise(resolve => {
-      const videoRect = video.getBoundingClientRect();
+      const player = video.closest('.bpx-player-container, .bilibili-player, .player-container') || video;
+      const candidateRect = player.getBoundingClientRect();
+      const fallbackRect = video.getBoundingClientRect();
+      const videoRect = candidateRect.width > 10 && candidateRect.height > 10 ? candidateRect : fallbackRect;
       const overlay = el('div', 'ai-ocr-select-overlay');
       const hint = el('div', 'ai-ocr-select-hint', '拖动圈选字幕区域，松开开始 OCR · Esc 取消');
       const box = el('div', 'ai-ocr-select-box');
-      overlay.style.left = `${videoRect.left}px`; overlay.style.top = `${videoRect.top}px`;
-      overlay.style.width = `${videoRect.width}px`; overlay.style.height = `${videoRect.height}px`;
       overlay.append(hint, box); (document.fullscreenElement || document.body).append(overlay); state.ocrOverlay = overlay;
       let start = null;
-      const point = event => ({ x: Math.max(0, Math.min(videoRect.width, event.clientX - videoRect.left)), y: Math.max(0, Math.min(videoRect.height, event.clientY - videoRect.top)) });
+      const point = event => ({ x: Math.max(videoRect.left, Math.min(videoRect.right, event.clientX)), y: Math.max(videoRect.top, Math.min(videoRect.bottom, event.clientY)) });
       const move = event => {
         if (!start) return;
         const end = point(event), rect = { left: Math.min(start.x, end.x), top: Math.min(start.y, end.y), right: Math.max(start.x, end.x), bottom: Math.max(start.y, end.y) };
         box.style.left = `${rect.left}px`; box.style.top = `${rect.top}px`; box.style.width = `${rect.right - rect.left}px`; box.style.height = `${rect.bottom - rect.top}px`;
       };
       const finish = value => {
-        overlay.remove(); state.ocrOverlay = null; removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('keydown', cancel); resolve(value);
+        overlay.remove(); state.ocrOverlay = null; removeEventListener('pointermove', move, true); removeEventListener('pointerup', up, true); removeEventListener('pointercancel', up, true); overlay.removeEventListener('pointerdown', down, true); removeEventListener('keydown', cancel); resolve(value);
       };
       const up = event => {
         if (!start) return;
@@ -301,8 +302,18 @@
         finish(width < 30 || height < 12 ? null : { x: left, y: top, width, height });
       };
       const cancel = event => { if (event.key === 'Escape') finish(null); };
-      overlay.addEventListener('pointerdown', event => { event.preventDefault(); start = point(event); overlay.setPointerCapture?.(event.pointerId); move(event); });
-      overlay.addEventListener('pointermove', move); overlay.addEventListener('pointerup', up); addEventListener('keydown', cancel);
+      const down = event => { event.preventDefault(); event.stopPropagation(); start = point(event); overlay.setPointerCapture?.(event.pointerId); move(event); };
+      overlay.addEventListener('pointerdown', down, true);
+      addEventListener('pointermove', move, true); addEventListener('pointerup', up, true); addEventListener('pointercancel', up, true); addEventListener('keydown', cancel);
+      // B 站某些播放器皮肤会吞掉 PointerEvent，保留鼠标事件作为兜底。
+      const mouseDown = event => down(event);
+      const mouseMove = event => move(event);
+      const mouseUp = event => up(event);
+      overlay.addEventListener('mousedown', mouseDown, true);
+      addEventListener('mousemove', mouseMove, true); addEventListener('mouseup', mouseUp, true);
+      const cleanupMouse = () => { overlay.removeEventListener('mousedown', mouseDown, true); removeEventListener('mousemove', mouseMove, true); removeEventListener('mouseup', mouseUp, true); };
+      const originalResolve = resolve;
+      resolve = value => { cleanupMouse(); originalResolve(value); };
     });
   }
 

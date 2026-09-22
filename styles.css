@@ -10,15 +10,20 @@
 }
 
 #ai-ocr-select-overlay {
-  inset: 0;
+  inset: 0 !important;
+  width: auto !important;
+  height: auto !important;
   z-index: 2147483647;
+  display: block;
   cursor: crosshair;
   background: rgba(0, 0, 0, 0.16);
   user-select: none;
   touch-action: none;
+  pointer-events: auto;
+  overflow: hidden;
 }
 .ai-ocr-select-hint {
-  position: fixed;
+  position: absolute;
   top: 18px;
   left: 50%;
   transform: translateX(-50%);
@@ -30,7 +35,7 @@
   pointer-events: none;
 }
 .ai-ocr-select-box {
-  position: fixed;
+  position: absolute;
   border: 2px solid #ff4e50;
   background: rgba(255, 78, 80, 0.12);
   box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.28);
