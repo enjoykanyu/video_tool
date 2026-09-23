@@ -21,6 +21,20 @@
   touch-action: none;
   pointer-events: auto;
   overflow: hidden;
+  isolation: isolate !important;
+  pointer-events: auto !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+.ai-ocr-select-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: auto !important;
+  cursor: crosshair !important;
+  background: transparent;
+  user-select: none !important;
+  -webkit-user-select: none !important;
 }
 .ai-ocr-select-hint {
   position: absolute;
@@ -33,6 +47,7 @@
   color: #fff;
   font-size: 13px;
   pointer-events: none;
+  z-index: 3;
 }
 .ai-ocr-select-box {
   position: absolute;

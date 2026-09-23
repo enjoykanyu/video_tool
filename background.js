@@ -120,16 +120,20 @@ async function fetchOnlineSubtitles(bvid, page) {
 }
 
 async function getConfig(overrides = {}) {
-  const keys = ['apiKey', 'baseUrl', 'provider', 'model', 'prompt'];
+  const keys = ['apiKey', 'asrApiKey', 'baseUrl', 'asrBaseUrl', 'provider', 'model', 'asrModel', 'prompt'];
   const result = await chrome.storage.local.get(keys);
   const provider = overrides.provider || result.provider || API_CONFIG.defaultProvider;
   const providerConfig = API_CONFIG.providers[provider] || API_CONFIG.providers.openai;
 
   return {
     apiKey: (overrides.apiKey !== undefined ? overrides.apiKey : (result.apiKey || '')).trim(),
+    asrApiKey: (overrides.asrApiKey !== undefined ? overrides.asrApiKey : (result.asrApiKey || result.apiKey || '')).trim(),
     baseUrl: normalizeBaseUrl(overrides.baseUrl !== undefined ? overrides.baseUrl : (result.baseUrl || providerConfig.baseUrl)),
+    asrBaseUrl: normalizeBaseUrl(overrides.asrBaseUrl !== undefined ? overrides.asrBaseUrl : (result.asrBaseUrl || result.baseUrl || providerConfig.baseUrl)),
     provider,
     model: ((overrides.model !== undefined ? overrides.model : '') || result.model || providerConfig.model).trim(),
+    // qwen3-asr-flash is the current OpenAI-compatible ASR endpoint.
+    asrModel: ((overrides.asrModel !== undefined ? overrides.asrModel : '') || (result.asrModel && result.asrModel !== 'qwen-audio-3.0-asr-flash' ? result.asrModel : 'qwen3-asr-flash')).trim(),
     prompt: overrides.prompt || result.prompt || getDefaultPrompt(),
   };
 }
@@ -257,7 +261,7 @@ async function cropScreenshot(dataUrl, crop, viewport) {
 
 async function ocrSubtitleFrame(timestamp, sender, crop, viewport) {
   const config = await getConfig();
-  if (!config.apiKey) throw new Error('未配置 API Key，请先在扩展设置中填写');
+  if (!config.apiKey) throw new Error('未配置翻译 API Key，请在扩展设置中填写');
   if (!sender?.tab?.windowId) throw new Error('无法定位当前视频标签页');
   const screenshot = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: 'png' });
   const image = await cropScreenshot(screenshot, crop, viewport);
@@ -290,13 +294,25 @@ async function ocrSubtitleFrame(timestamp, sender, crop, viewport) {
 }
 
 async function transcribeAudio(audio, config) {
-  if (!config.apiKey) throw new Error('未配置 API Key，请先在扩展设置中填写');
-  if (config.provider === 'bailian') return transcribeAudioWithQwen(audio, config);
-  const model = config.provider === 'openai' ? 'whisper-1' : 'qwen-audio-turbo';
+  if (!config.asrApiKey) throw new Error('未配置语音 API Key，请在扩展设置中填写');
+  if (!config.asrBaseUrl) throw new Error('未配置语音识别 URL，请在扩展设置中填写');
+  if (/^qwen3-asr-flash(?:-[a-z0-9-]+)?$/i.test(config.asrModel)) {
+    return transcribeAudioWithQwen3Compatible(audio, config);
+  }
+  if (/qwen-audio-3\.0-asr-flash/i.test(config.asrModel)) {
+    if (!/maas\.aliyuncs\.com|dashscope\.aliyuncs\.com/i.test(config.asrBaseUrl)) {
+      throw new Error(`语音识别 URL 不支持 Qwen ASR：${config.asrBaseUrl}。请在“语音识别 URL”中填写 env.md 的百炼工作区地址`);
+    }
+    return transcribeAudioWithQwen(audio, config);
+  }
+  if (/maas\.aliyuncs\.com|dashscope\.aliyuncs\.com/i.test(config.asrBaseUrl)) return transcribeAudioWithQwen(audio, config);
+  const model = config.asrModel || (config.provider === 'openai' ? 'whisper-1' : 'qwen-audio-turbo');
+  const bytes = await audioBytes(audio);
+  assertWav(bytes);
   const form = new FormData();
-  form.append('file', new Blob([audio], { type: 'audio/webm' }), 'video-audio.webm');
+  form.append('file', new Blob([bytes], { type: 'audio/wav' }), 'video-audio.wav');
   form.append('model', model); form.append('language', 'en'); form.append('response_format', 'verbose_json');
-  const response = await fetch(`${config.baseUrl}/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}` }, body: form });
+  const response = await fetch(`${config.asrBaseUrl}/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${config.asrApiKey}` }, body: form });
   if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(`语音识别 API错误 ${response.status}: ${error.error?.message || response.statusText}`); }
   const data = await response.json();
   const segments = Array.isArray(data.segments) ? data.segments : [];
@@ -304,28 +320,102 @@ async function transcribeAudio(audio, config) {
   return segments.map(item => ({ from: Number(item.start), to: Number(item.end), content: String(item.text || '').trim(), translation: '' })).filter(item => item.content && item.to > item.from);
 }
 
-async function transcribeAudioWithQwen(audio, config) {
-  const bytes = new Uint8Array(await new Blob([audio]).arrayBuffer());
+async function audioBytes(audio) {
+  if (audio instanceof Blob) return new Uint8Array(await audio.arrayBuffer());
+  if (audio instanceof ArrayBuffer) return new Uint8Array(audio);
+  if (ArrayBuffer.isView(audio)) return new Uint8Array(audio.buffer, audio.byteOffset, audio.byteLength);
+  // Keep compatibility with runtimes that serialize a byte array as {type,data}.
+  if (audio && audio.type === 'Buffer' && Array.isArray(audio.data)) return Uint8Array.from(audio.data);
+  if (Array.isArray(audio)) return Uint8Array.from(audio);
+  throw new Error('音频数据未正确传到后台，请刷新 B 站页面后重试');
+}
+
+function assertWav(bytes) {
+  const header = String.fromCharCode(...bytes.subarray(0, 12));
+  if (bytes.byteLength < 44 || !header.startsWith('RIFF') || header.slice(8, 12) !== 'WAVE') {
+    throw new Error('生成的音频不是有效 WAV，请刷新 B 站页面后重试');
+  }
+}
+
+function qwenNativeUrl(baseUrl) {
+  const url = new URL(baseUrl);
+  return `${url.origin}/api/v1/services/aigc/multimodal-generation/generation`;
+}
+
+function qwenCompatibleUrl(baseUrl) {
+  const url = new URL(baseUrl);
+  return `${url.origin}/compatible-mode/v1/chat/completions`;
+}
+
+async function responseError(response, prefix) {
+  const text = await response.text().catch(() => '');
+  let message = '';
+  try {
+    const data = text ? JSON.parse(text) : {};
+    message = data.error?.message || data.message || data.code || '';
+  } catch (_) {}
+  if (!message && text && text !== '{}') message = text.slice(0, 240);
+  return `${prefix} ${response.status}${message ? `：${message}` : '（服务端未返回详细错误；请检查模型、URL 和语音 Key）'}`;
+}
+
+async function transcribeAudioWithQwen3Compatible(audio, config) {
+  const bytes = await audioBytes(audio);
+  assertWav(bytes);
   let binary = '';
   for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+  const response = await fetch(qwenCompatibleUrl(config.asrBaseUrl), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.asrApiKey}` },
     body: JSON.stringify({
-      model: 'qwen-audio-turbo',
-      messages: [{ role: 'system', content: 'You are an English ASR engine. Output pure JSON only.' }, { role: 'user', content: [
-        { type: 'text', text: '转写这段音频中的英文，只保留英文语音。请返回 JSON 数组，每项包含相对于本片段的 from、to（秒）和 content。没有语音则返回 []。不要解释。' },
-        { type: 'input_audio', input_audio: { data: `data:audio/webm;base64,${btoa(binary)}`, format: 'webm' } },
-      ] }], temperature: 0, max_tokens: 2000,
+      model: config.asrModel,
+      messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: `data:audio/wav;base64,${btoa(binary)}` } }] }],
+      stream: false,
+      asr_options: { language: 'en', enable_itn: false },
     }),
   });
-  if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(`百炼语音识别 API错误 ${response.status}: ${error.error?.message || response.statusText}`); }
+  if (!response.ok) throw new Error(await responseError(response, '百炼 Qwen3 ASR API 错误'));
   const data = await response.json();
-  const content = data.choices?.[0]?.message?.content;
+  const raw = data.choices?.[0]?.message?.content;
+  const content = Array.isArray(raw) ? raw.map(item => item.text || '').join('') : raw;
+  if (!content || !String(content).trim()) throw new Error('百炼 Qwen3 ASR 返回空内容');
+  return timedSegments(String(content).trim(), Number(config.segmentDuration || 10));
+}
+
+function timedSegments(text, duration) {
+  const parts = String(text || '').replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/).filter(Boolean);
+  if (!parts.length) return [];
+  const total = parts.reduce((sum, part) => sum + part.length, 0) || 1;
+  let cursor = 0;
+  return parts.map((content, index) => {
+    const from = cursor;
+    cursor += Number(duration || 0) * content.length / total;
+    return { from, to: index === parts.length - 1 ? Number(duration || 0) : cursor, content, translation: '' };
+  }).filter(item => item.to > item.from);
+}
+
+async function transcribeAudioWithQwen(audio, config) {
+  const bytes = await audioBytes(audio);
+  assertWav(bytes);
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  const response = await fetch(qwenNativeUrl(config.asrBaseUrl), {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.asrApiKey}`, 'X-DashScope-SSE': 'disable' },
+    body: JSON.stringify({
+      model: config.asrModel || 'qwen-audio-3.0-asr-flash',
+      input: { messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: `data:audio/wav;base64,${btoa(binary)}` } }] }] },
+      parameters: { format: 'wav', sample_rate: '16000', language_hints: ['en'] },
+    }),
+  });
+  if (!response.ok) throw new Error(await responseError(response, '百炼 Qwen-Audio ASR API 错误'));
+  const data = await response.json();
+  const raw = data.output?.choices?.[0]?.message?.content || data.choices?.[0]?.message?.content;
+  const content = Array.isArray(raw) ? raw.map(item => item.text || '').join('') : raw;
   if (!content) throw new Error('百炼语音识别返回空内容');
-  const parsed = parseModelJson(content);
+  let parsed = null;
+  try { parsed = parseModelJson(content); } catch (_) {}
   const segments = Array.isArray(parsed) ? parsed : parsed?.segments;
-  if (!Array.isArray(segments)) throw new Error('百炼语音识别没有返回时间轴数组');
-  return segments.map(item => ({ from: Number(item.from ?? item.start), to: Number(item.to ?? item.end), content: String(item.content || item.text || '').trim(), translation: '' })).filter(item => item.content && Number.isFinite(item.from) && Number.isFinite(item.to) && item.to > item.from);
+  if (Array.isArray(segments)) return segments.map(item => ({ from: Number(item.from ?? item.start), to: Number(item.to ?? item.end), content: String(item.content || item.text || '').trim(), translation: '' })).filter(item => item.content && Number.isFinite(item.from) && Number.isFinite(item.to) && item.to > item.from);
+  return timedSegments(content, Number(config.segmentDuration || 10));
 }
 
 function parseModelJson(content) {
@@ -382,7 +472,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       } else if (request.action === 'ocrSubtitleFrame') {
         sendResponse({ success: true, ...(await ocrSubtitleFrame(request.timestamp, sender, request.crop, request.viewport)) });
       } else if (request.action === 'transcribeAudio') {
-        sendResponse({ success: true, subtitles: await transcribeAudio(request.audio, await getConfig()) });
+        const config = await getConfig();
+        config.segmentDuration = Number(request.duration || 10);
+        sendResponse({ success: true, subtitles: await transcribeAudio(request.audio, config) });
       }
     } catch (error) {
       sendResponse({ success: false, error: error.message });

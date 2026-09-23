@@ -184,14 +184,21 @@
     if (!video?.captureStream || !Number.isFinite(video.duration) || video.duration <= 0) return showStatus('当前浏览器不支持音频捕获或视频时长不可用', 'error');
     const originalTime = video.currentTime, wasPlaying = !video.paused, run = state.generation;
     const segmentSeconds = 10;
-    state.chooser.hidden = true; video.pause(); video.currentTime = 0; state.subtitles = [];
+    const progressKey = `${state.cacheBase}asr:progress`;
+    const stored = await chrome.storage.local.get(progressKey);
+    const checkpoint = stored[progressKey];
+    const resumable = checkpoint && Math.abs(Number(checkpoint.duration || 0) - video.duration) < 120 && Array.isArray(checkpoint.subtitles);
+    let segmentStart = resumable ? Math.max(0, Number(checkpoint.nextStart || 0)) : 0;
+    state.chooser.hidden = true; video.pause(); video.currentTime = segmentStart; state.subtitles = resumable ? checkpoint.subtitles : [];
     try {
+      if (state.subtitles.length) activate(state.subtitles, `已恢复 ${state.subtitles.length} 条字幕，将从 ${Math.round(segmentStart)} 秒继续`, false);
+      await translatePendingAsr(run);
       const stream = video.captureStream(), audioTracks = stream.getAudioTracks();
       if (!audioTracks.length) throw new Error('当前视频没有可捕获的音轨');
       const mimeType = ['audio/webm;codecs=opus', 'audio/webm'].find(type => MediaRecorder.isTypeSupported(type));
       if (!mimeType) throw new Error('当前浏览器不支持 WebM 音频录制');
       const audioStream = new MediaStream(audioTracks);
-      for (let segmentStart = 0; segmentStart < video.duration && run === state.generation;) {
+      for (; segmentStart < video.duration && run === state.generation;) {
         const segmentEnd = Math.min(video.duration, segmentStart + segmentSeconds);
         const recorder = new MediaRecorder(audioStream, { mimeType });
         const chunks = [];
@@ -200,25 +207,86 @@
         const reached = waitForVideoTime(video, segmentEnd);
         recorder.start(); await video.play(); await reached; video.pause(); recorder.stop();
         const audio = await finished;
-        showStatus(`正在识别 ${Math.round(segmentStart)}–${Math.round(segmentEnd)} 秒，并结合上下文翻译…`, 'loading');
-        const result = await chrome.runtime.sendMessage({ action: 'transcribeAudio', audio });
+        const wav = await audioBlobToWav(audio);
+        showStatus(`正在识别 ${Math.round(segmentStart)}–${Math.round(segmentEnd)} 秒，英文字幕会立即显示…`, 'loading');
+        // Send raw bytes across the extension boundary. Blob objects can be
+        // rehydrated as plain objects in some Chromium versions, which makes
+        // the ASR endpoint reject the resulting audio as an invalid WAV.
+        const result = await chrome.runtime.sendMessage({ action: 'transcribeAudio', audio: await wav.arrayBuffer(), duration: segmentEnd - segmentStart });
         if (!result?.success) throw new Error(result?.error || '语音识别失败');
         const detected = (result.subtitles || []).map(item => ({ ...item, from: item.from + segmentStart, to: item.to + segmentStart }));
         if (detected.length) {
-          const context = [...state.subtitles, ...detected].map(item => item.content).join('\n').slice(-12000);
-          const translated = await chrome.runtime.sendMessage({ action: 'translateSubtitles', direction: 'en2zh', fullContext: context, subtitles: detected });
-          if (!translated?.success) throw new Error(translated?.error || '翻译失败');
-          state.subtitles.push(...translated.translations);
+          state.subtitles.push(...detected);
           state.subtitles.sort((a, b) => a.from - b.from);
-          activate(state.subtitles, `已生成 ${state.subtitles.length} 条双语字幕，进度 ${Math.round(segmentEnd)} / ${Math.round(video.duration)} 秒`, false);
+          activate(state.subtitles, `英文字幕 ${state.subtitles.length} 条，识别进度 ${Math.round(segmentEnd)} / ${Math.round(video.duration)} 秒`, false);
           await chrome.storage.local.set({ [`${state.cacheBase}asr`]: makeRecord(state.subtitles, 'asr', { fileName: '语音识别英文.srt' }) });
+          await saveAsrProgress(progressKey, segmentEnd, video.duration);
+          const context = state.subtitles.map(item => item.content).join('\n').slice(-12000);
+          const translated = await chrome.runtime.sendMessage({ action: 'translateSubtitles', direction: 'en2zh', fullContext: context, subtitles: detected });
+          if (translated?.success && translated.translations?.length === detected.length) {
+            for (const item of translated.translations) {
+              const target = state.subtitles.find(entry => entry.from === item.from && entry.to === item.to && entry.content === item.content);
+              if (target) target.translation = item.translation || '';
+            }
+            state.currentIndex = -2; update();
+            await chrome.storage.local.set({ [`${state.cacheBase}asr`]: makeRecord(state.subtitles, 'asr', { fileName: '语音识别英文.srt' }) });
+            await saveAsrProgress(progressKey, segmentEnd, video.duration);
+          }
+        } else {
+          await saveAsrProgress(progressKey, segmentEnd, video.duration);
         }
         segmentStart = segmentEnd;
       }
       if (!state.subtitles.length) throw new Error('没有识别到英文语音');
+      await chrome.storage.local.remove(progressKey);
       await refreshRecords(); showStatus(`语音识别与翻译完成，共 ${state.subtitles.length} 条`, 'success');
-    } catch (error) { showStatus(`语音识别失败：${error.message}`, 'error'); }
+    } catch (error) {
+      await saveAsrProgress(progressKey, segmentStart, video.duration).catch(() => {});
+      showStatus(`语音识别暂停：${error.message}。已保留 ${state.subtitles.length} 条，换 Key 或模型后再次点击将继续`, 'error');
+    }
     finally { video.currentTime = originalTime; if (wasPlaying) video.play().catch(() => {}); }
+  }
+
+  async function saveAsrProgress(key, nextStart, duration) {
+    await chrome.storage.local.set({ [key]: { schema: 1, bvid: state.bvid, page: state.page, duration, nextStart, subtitles: state.subtitles, savedAt: Date.now() } });
+  }
+
+  async function translatePendingAsr(run) {
+    const pending = state.subtitles.filter(item => !item.translation);
+    for (let start = 0; start < pending.length; start += 40) {
+      if (run !== state.generation) return;
+      const batch = pending.slice(start, start + 40);
+      const context = state.subtitles.map(item => item.content).join('\n').slice(-12000);
+      const response = await chrome.runtime.sendMessage({ action: 'translateSubtitles', direction: 'en2zh', fullContext: context, subtitles: batch });
+      if (!response?.success || response.translations?.length !== batch.length) throw new Error(response?.error || '待翻译字幕返回数量不正确');
+      for (const item of response.translations) {
+        const target = state.subtitles.find(entry => entry.from === item.from && entry.to === item.to && entry.content === item.content);
+        if (target) target.translation = item.translation || '';
+      }
+      state.currentIndex = -2; update();
+      await chrome.storage.local.set({ [`${state.cacheBase}asr`]: makeRecord(state.subtitles, 'asr', { fileName: '语音识别英文.srt' }) });
+    }
+  }
+
+  async function audioBlobToWav(blob) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) throw new Error('当前浏览器不支持音频解码');
+    const context = new AudioContextClass();
+    try {
+      const decoded = await context.decodeAudioData(await blob.arrayBuffer());
+      const sampleRate = 16000;
+      const length = Math.max(1, Math.ceil(decoded.duration * sampleRate));
+      const offline = new OfflineAudioContext(1, length, sampleRate);
+      const source = offline.createBufferSource(); source.buffer = decoded; source.connect(offline.destination); source.start();
+      const rendered = await offline.startRendering();
+      const samples = rendered.getChannelData(0);
+      const buffer = new ArrayBuffer(44 + samples.length * 2), view = new DataView(buffer);
+      const write = (offset, value) => { for (let index = 0; index < value.length; index++) view.setUint8(offset + index, value.charCodeAt(index)); };
+      write(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true); write(8, 'WAVE'); write(12, 'fmt ');
+      view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); write(36, 'data'); view.setUint32(40, samples.length * 2, true);
+      for (let index = 0; index < samples.length; index++) { const value = Math.max(-1, Math.min(1, samples[index])); view.setInt16(44 + index * 2, value < 0 ? value * 0x8000 : value * 0x7fff, true); }
+      return new Blob([buffer], { type: 'audio/wav' });
+    } finally { await context.close(); }
   }
 
   function waitForVideoTime(video, target) {
@@ -283,9 +351,11 @@
       const fallbackRect = video.getBoundingClientRect();
       const videoRect = candidateRect.width > 10 && candidateRect.height > 10 ? candidateRect : fallbackRect;
       const overlay = el('div', 'ai-ocr-select-overlay');
+      const hit = el('div', 'ai-ocr-select-hit');
       const hint = el('div', 'ai-ocr-select-hint', '拖动圈选字幕区域，松开开始 OCR · Esc 取消');
       const box = el('div', 'ai-ocr-select-box');
-      overlay.append(hint, box); (document.fullscreenElement || document.body).append(overlay); state.ocrOverlay = overlay;
+      const fullscreenHost = document.fullscreenElement && document.fullscreenElement !== video ? document.fullscreenElement : document.body;
+      overlay.append(hit, hint, box); fullscreenHost.append(overlay); state.ocrOverlay = overlay;
       let start = null;
       const point = event => ({ x: Math.max(videoRect.left, Math.min(videoRect.right, event.clientX)), y: Math.max(videoRect.top, Math.min(videoRect.bottom, event.clientY)) });
       const move = event => {
@@ -294,7 +364,7 @@
         box.style.left = `${rect.left}px`; box.style.top = `${rect.top}px`; box.style.width = `${rect.right - rect.left}px`; box.style.height = `${rect.bottom - rect.top}px`;
       };
       const finish = value => {
-        overlay.remove(); state.ocrOverlay = null; removeEventListener('pointermove', move, true); removeEventListener('pointerup', up, true); removeEventListener('pointercancel', up, true); overlay.removeEventListener('pointerdown', down, true); removeEventListener('keydown', cancel); resolve(value);
+        overlay.remove(); state.ocrOverlay = null; removeEventListener('pointermove', move, true); removeEventListener('pointerup', up, true); removeEventListener('pointercancel', up, true); hit.removeEventListener('pointerdown', down, true); removeEventListener('keydown', cancel); resolve(value);
       };
       const up = event => {
         if (!start) return;
@@ -303,15 +373,15 @@
       };
       const cancel = event => { if (event.key === 'Escape') finish(null); };
       const down = event => { event.preventDefault(); event.stopPropagation(); start = point(event); overlay.setPointerCapture?.(event.pointerId); move(event); };
-      overlay.addEventListener('pointerdown', down, true);
+      hit.addEventListener('pointerdown', down, true);
       addEventListener('pointermove', move, true); addEventListener('pointerup', up, true); addEventListener('pointercancel', up, true); addEventListener('keydown', cancel);
       // B 站某些播放器皮肤会吞掉 PointerEvent，保留鼠标事件作为兜底。
       const mouseDown = event => down(event);
       const mouseMove = event => move(event);
       const mouseUp = event => up(event);
-      overlay.addEventListener('mousedown', mouseDown, true);
+      hit.addEventListener('mousedown', mouseDown, true);
       addEventListener('mousemove', mouseMove, true); addEventListener('mouseup', mouseUp, true);
-      const cleanupMouse = () => { overlay.removeEventListener('mousedown', mouseDown, true); removeEventListener('mousemove', mouseMove, true); removeEventListener('mouseup', mouseUp, true); };
+      const cleanupMouse = () => { hit.removeEventListener('mousedown', mouseDown, true); removeEventListener('mousemove', mouseMove, true); removeEventListener('mouseup', mouseUp, true); };
       const originalResolve = resolve;
       resolve = value => { cleanupMouse(); originalResolve(value); };
     });

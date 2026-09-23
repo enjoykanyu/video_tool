@@ -2,8 +2,11 @@
 document.addEventListener('DOMContentLoaded', async () => {
   const provider = document.getElementById('provider');
   const baseUrl = document.getElementById('baseUrl');
+  const asrBaseUrl = document.getElementById('asrBaseUrl');
   const apiKey = document.getElementById('apiKey');
+  const asrApiKey = document.getElementById('asrApiKey');
   const model = document.getElementById('model');
+  const asrModel = document.getElementById('asrModel');
   const prompt = document.getElementById('prompt');
   const fontSize = document.getElementById('fontSize');
   const fontSizeValue = document.getElementById('fontSizeValue');
@@ -49,13 +52,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 加载保存的配置
   const result = await chrome.storage.local.get([
-    'apiKey', 'baseUrl', 'provider', 'model', 'prompt', 'fontSize', 'position', 'backgroundOpacity'
+    'apiKey', 'asrApiKey', 'baseUrl', 'asrBaseUrl', 'provider', 'model', 'asrModel', 'prompt', 'fontSize', 'position', 'backgroundOpacity'
   ]);
   
   if (result.provider) provider.value = result.provider;
   if (result.baseUrl) baseUrl.value = result.baseUrl;
+  if (result.asrBaseUrl) asrBaseUrl.value = result.asrBaseUrl;
   if (result.apiKey) apiKey.value = result.apiKey;
+  if (result.asrApiKey) asrApiKey.value = result.asrApiKey;
   if (result.model) model.value = result.model;
+  asrModel.value = result.asrModel && result.asrModel !== 'qwen-audio-3.0-asr-flash' ? result.asrModel : 'qwen3-asr-flash';
   if (result.prompt) prompt.value = result.prompt;
   if (result.fontSize) fontSize.value = String(Math.max(14, Math.min(40, Number(result.fontSize))));
   if (result.position) position.value = result.position;
@@ -145,9 +151,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       await chrome.storage.local.set({
         apiKey: apiKey.value,
+        asrApiKey: asrApiKey.value,
         baseUrl: baseUrl.value,
+        asrBaseUrl: asrBaseUrl.value,
         provider: provider.value,
         model: model.value,
+        asrModel: asrModel.value,
         prompt: prompt.value,
         fontSize: fontSize.value,
         position: position.value,

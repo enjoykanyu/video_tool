@@ -292,11 +292,23 @@
       <input type="url" id="baseUrl" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
       <div class="hint">百炼请填 compatible-mode/v1 结尾的地址</div>
     </div>
+
+    <div class="form-group">
+      <label for="asrBaseUrl">语音识别 URL</label>
+      <input type="url" id="asrBaseUrl" placeholder="与 env.md 中的百炼工作区 Base URL 一致">
+      <div class="hint">语音识别独立使用百炼工作区地址；留空则沿用上面的 Base URL</div>
+    </div>
     
     <div class="form-group">
       <label for="apiKey">API Key</label>
       <input type="password" id="apiKey" placeholder="sk-...">
-      <div class="hint">密钥仅保存在本地，不会上传</div>
+      <div class="hint">翻译 API Key，仅保存在本地</div>
+    </div>
+
+    <div class="form-group">
+      <label for="asrApiKey">语音 API Key</label>
+      <input type="password" id="asrApiKey" placeholder="百炼语音识别专用 Key">
+      <div class="hint">语音识别独立使用；留空则兼容旧配置，暂时沿用翻译 Key</div>
     </div>
     
     <div class="form-group">
@@ -305,6 +317,12 @@
       <div class="provider-info" id="modelHint">
         百炼推荐: deepseek-v4-flash | qwen3.8-max | qwen3.8-flash
       </div>
+    </div>
+
+    <div class="form-group">
+      <label for="asrModel">语音模型</label>
+      <input type="text" id="asrModel" placeholder="qwen3-asr-flash">
+      <div class="hint">推荐 qwen3-asr-flash（兼容接口）；不要填翻译模型名称。旧部署可填 qwen-audio-3.0-asr-flash</div>
     </div>
     
     <button class="btn secondary" id="testBtn">🔗 测试连接</button>
@@ -368,7 +386,7 @@
   <button class="btn" id="saveBtn">保存设置</button>
   
   <div class="footer">
-    v2.5.6 | <a href="#" id="helpLink">使用帮助</a>
+    v2.7.3 | <a href="#" id="helpLink">使用帮助</a>
   </div>
 
   <script src="popup.js"></script>
