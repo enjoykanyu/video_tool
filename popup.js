@@ -61,7 +61,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (result.apiKey) apiKey.value = result.apiKey;
   if (result.asrApiKey) asrApiKey.value = result.asrApiKey;
   if (result.model) model.value = result.model;
-  asrModel.value = result.asrModel && result.asrModel !== 'qwen-audio-3.0-asr-flash' ? result.asrModel : 'qwen3-asr-flash';
+  asrModel.value = result.asrModel && !/^qwen(?:3-asr-flash|audio-3\.0-asr-flash)$/i.test(result.asrModel) ? result.asrModel : 'qwen-audio-3.1-asr-flash-filetrans';
   if (result.prompt) prompt.value = result.prompt;
   if (result.fontSize) fontSize.value = String(Math.max(14, Math.min(40, Number(result.fontSize))));
   if (result.position) position.value = result.position;

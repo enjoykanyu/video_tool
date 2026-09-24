@@ -321,8 +321,8 @@
 
     <div class="form-group">
       <label for="asrModel">语音模型</label>
-      <input type="text" id="asrModel" placeholder="qwen3-asr-flash">
-      <div class="hint">推荐 qwen3-asr-flash（兼容接口）；不要填翻译模型名称。旧部署可填 qwen-audio-3.0-asr-flash</div>
+      <input type="text" id="asrModel" placeholder="qwen-audio-3.1-asr-flash-filetrans">
+      <div class="hint">推荐 qwen-audio-3.1-asr-flash-filetrans，可返回句子时间戳并生成更准确的 SRT</div>
     </div>
     
     <button class="btn secondary" id="testBtn">🔗 测试连接</button>
@@ -386,7 +386,7 @@
   <button class="btn" id="saveBtn">保存设置</button>
   
   <div class="footer">
-    v2.7.3 | <a href="#" id="helpLink">使用帮助</a>
+    v2.7.5 | <a href="#" id="helpLink">使用帮助</a>
   </div>
 
   <script src="popup.js"></script>

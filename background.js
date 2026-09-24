@@ -133,7 +133,7 @@ async function getConfig(overrides = {}) {
     provider,
     model: ((overrides.model !== undefined ? overrides.model : '') || result.model || providerConfig.model).trim(),
     // qwen3-asr-flash is the current OpenAI-compatible ASR endpoint.
-    asrModel: ((overrides.asrModel !== undefined ? overrides.asrModel : '') || (result.asrModel && result.asrModel !== 'qwen-audio-3.0-asr-flash' ? result.asrModel : 'qwen3-asr-flash')).trim(),
+    asrModel: ((overrides.asrModel !== undefined ? overrides.asrModel : '') || (result.asrModel && !/^qwen(?:3-asr-flash|audio-3\.0-asr-flash)$/i.test(result.asrModel) ? result.asrModel : 'qwen-audio-3.1-asr-flash-filetrans')).trim(),
     prompt: overrides.prompt || result.prompt || getDefaultPrompt(),
   };
 }
@@ -296,6 +296,9 @@ async function ocrSubtitleFrame(timestamp, sender, crop, viewport) {
 async function transcribeAudio(audio, config) {
   if (!config.asrApiKey) throw new Error('未配置语音 API Key，请在扩展设置中填写');
   if (!config.asrBaseUrl) throw new Error('未配置语音识别 URL，请在扩展设置中填写');
+  if (/filetrans$/i.test(config.asrModel)) {
+    return transcribeAudioWithFiletrans(audio, config);
+  }
   if (/^qwen3-asr-flash(?:-[a-z0-9-]+)?$/i.test(config.asrModel)) {
     return transcribeAudioWithQwen3Compatible(audio, config);
   }
@@ -320,7 +323,79 @@ async function transcribeAudio(audio, config) {
   return segments.map(item => ({ from: Number(item.start), to: Number(item.end), content: String(item.text || '').trim(), translation: '' })).filter(item => item.content && item.to > item.from);
 }
 
+function qwenFiletransSubmitUrl(baseUrl) {
+  const url = new URL(baseUrl);
+  return `${url.origin}/api/v1/services/audio/asr/transcription`;
+}
+
+function qwenTaskUrl(baseUrl, taskId) {
+  const url = new URL(baseUrl);
+  return `${url.origin}/api/v1/tasks/${encodeURIComponent(taskId)}`;
+}
+
+async function dashScopeError(response, prefix) {
+  const text = await response.text().catch(() => '');
+  let message = '';
+  try { const data = text ? JSON.parse(text) : {}; message = data.message || data.error?.message || data.code || ''; } catch (_) {}
+  return `${prefix} ${response.status}${message ? `：${message}` : text ? `：${text.slice(0, 240)}` : ''}`;
+}
+
+async function transcribeAudioWithFiletrans(audio, config) {
+  const bytes = await audioBytes(audio);
+  assertWav(bytes);
+  const model = config.asrModel;
+  const policyResponse = await fetch(`https://dashscope.aliyuncs.com/api/v1/uploads?action=getPolicy&model=${encodeURIComponent(model)}`, {
+    headers: { Authorization: `Bearer ${config.asrApiKey}`, 'Content-Type': 'application/json' },
+  });
+  if (!policyResponse.ok) throw new Error(await dashScopeError(policyResponse, '百炼文件上传凭证错误'));
+  const policy = (await policyResponse.json()).data;
+  if (!policy?.upload_host || !policy?.upload_dir) throw new Error('百炼没有返回文件上传凭证');
+  const fileName = `subtitle-${Date.now()}.wav`, key = `${policy.upload_dir}/${fileName}`;
+  const form = new FormData();
+  for (const [name, value] of Object.entries({ OSSAccessKeyId: policy.oss_access_key_id, Signature: policy.signature, policy: policy.policy, 'x-oss-object-acl': policy.x_oss_object_acl, 'x-oss-forbid-overwrite': policy.x_oss_forbid_overwrite, key, success_action_status: '200' })) form.append(name, value);
+  form.append('file', new Blob([bytes], { type: 'audio/wav' }), fileName);
+  const uploadResponse = await fetch(policy.upload_host, { method: 'POST', body: form });
+  if (!uploadResponse.ok) throw new Error(await dashScopeError(uploadResponse, '百炼音频上传错误'));
+  const fileUrl = `oss://${key}`;
+  const submitResponse = await fetch(qwenFiletransSubmitUrl(config.asrBaseUrl), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${config.asrApiKey}`, 'Content-Type': 'application/json', 'X-DashScope-Async': 'enable', 'X-DashScope-OssResourceResolve': 'enable' },
+    body: JSON.stringify({ model, input: { file_urls: [fileUrl] }, parameters: { channel_id: [0], language_hints: ['en'] } }),
+  });
+  if (!submitResponse.ok) throw new Error(await dashScopeError(submitResponse, '百炼文件转写提交错误'));
+  const submitted = await submitResponse.json(), taskId = submitted.output?.task_id;
+  if (!taskId) throw new Error('百炼文件转写没有返回任务 ID');
+  let result;
+  for (let attempt = 0; attempt < 90; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const pollResponse = await fetch(qwenTaskUrl(config.asrBaseUrl, taskId), { headers: { Authorization: `Bearer ${config.asrApiKey}`, 'X-DashScope-OssResourceResolve': 'enable' } });
+    if (!pollResponse.ok) throw new Error(await dashScopeError(pollResponse, '百炼文件转写查询错误'));
+    result = await pollResponse.json();
+    const status = result.output?.task_status || result.task_status;
+    if (status === 'SUCCEEDED' || status === 'FAILED') break;
+  }
+  const status = result?.output?.task_status || result?.task_status;
+  if (status !== 'SUCCEEDED') throw new Error(result?.output?.message || result?.message || `百炼文件转写失败（${status || '超时'}）`);
+  const transcriptionUrl = result.output?.results?.[0]?.transcription_url || result.output?.transcription_url;
+  if (!transcriptionUrl) throw new Error('百炼文件转写完成但没有结果地址');
+  const transcriptionResponse = await fetch(transcriptionUrl);
+  if (!transcriptionResponse.ok) throw new Error('无法下载百炼文件转写结果');
+  const transcription = await transcriptionResponse.json();
+  const sentences = (transcription.transcripts || []).flatMap(item => item.sentences || []);
+  return sentences.map(item => ({ from: Number(item.begin_time) / 1000, to: Number(item.end_time) / 1000, content: String(item.text || '').trim(), translation: '' })).filter(item => item.content && item.to > item.from);
+}
+
 async function audioBytes(audio) {
+  if (typeof audio === 'string') {
+    const encoded = audio.includes(',') ? audio.slice(audio.indexOf(',') + 1) : audio;
+    try {
+      const binary = atob(encoded), bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+      return bytes;
+    } catch (_) {
+      throw new Error('音频 Base64 数据损坏，请刷新 B 站页面后重试');
+    }
+  }
   if (audio instanceof Blob) return new Uint8Array(await audio.arrayBuffer());
   if (audio instanceof ArrayBuffer) return new Uint8Array(audio);
   if (ArrayBuffer.isView(audio)) return new Uint8Array(audio.buffer, audio.byteOffset, audio.byteLength);
@@ -474,7 +549,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       } else if (request.action === 'transcribeAudio') {
         const config = await getConfig();
         config.segmentDuration = Number(request.duration || 10);
-        sendResponse({ success: true, subtitles: await transcribeAudio(request.audio, config) });
+        sendResponse({ success: true, subtitles: await transcribeAudio(request.audioBase64 || request.audio, config) });
       }
     } catch (error) {
       sendResponse({ success: false, error: error.message });

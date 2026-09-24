@@ -209,10 +209,10 @@
         const audio = await finished;
         const wav = await audioBlobToWav(audio);
         showStatus(`正在识别 ${Math.round(segmentStart)}–${Math.round(segmentEnd)} 秒，英文字幕会立即显示…`, 'loading');
-        // Send raw bytes across the extension boundary. Blob objects can be
-        // rehydrated as plain objects in some Chromium versions, which makes
-        // the ASR endpoint reject the resulting audio as an invalid WAV.
-        const result = await chrome.runtime.sendMessage({ action: 'transcribeAudio', audio: await wav.arrayBuffer(), duration: segmentEnd - segmentStart });
+        // Blob and ArrayBuffer are not reliably preserved between a content
+        // script and a Manifest V3 service worker. Base64 survives Chrome's
+        // message serialization consistently.
+        const result = await chrome.runtime.sendMessage({ action: 'transcribeAudio', audioBase64: await blobToBase64(wav), duration: segmentEnd - segmentStart });
         if (!result?.success) throw new Error(result?.error || '语音识别失败');
         const detected = (result.subtitles || []).map(item => ({ ...item, from: item.from + segmentStart, to: item.to + segmentStart }));
         if (detected.length) {
@@ -287,6 +287,13 @@
       for (let index = 0; index < samples.length; index++) { const value = Math.max(-1, Math.min(1, samples[index])); view.setInt16(44 + index * 2, value < 0 ? value * 0x8000 : value * 0x7fff, true); }
       return new Blob([buffer], { type: 'audio/wav' });
     } finally { await context.close(); }
+  }
+
+  async function blobToBase64(blob) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = '';
+    for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+    return btoa(binary);
   }
 
   function waitForVideoTime(video, target) {
