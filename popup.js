@@ -96,14 +96,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function updateModelHint(provider) {
     const hints = {
-      bailian: '百炼推荐: qwen3.8-flash | qwen3.8-max | deepseek-v4.1-flash',
       openai: 'OpenAI推荐: gpt-4o-mini | gpt-4o'
     };
     modelHint.textContent = hints[provider] || hints.openai;
     
     // 自动填充默认模型
     const defaults = {
-      bailian: 'qwen3.8-flash',
       openai: 'gpt-4o-mini'
     };
     if (!model.value || model.value === defaults[Object.keys(defaults).find(k => defaults[k] === model.value)]) {

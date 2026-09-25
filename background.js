@@ -1,17 +1,12 @@
 const API_CONFIG = {
   providers: {
-    bailian: {
-      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-      model: 'qwen3.8-flash',
-      maxTokens: 6000,
-    },
     openai: {
       baseUrl: 'https://api.openai.com/v1',
       model: 'gpt-4o-mini',
       maxTokens: 4000,
     },
   },
-  defaultProvider: 'bailian',
+  defaultProvider: 'openai',
 };
 
 
