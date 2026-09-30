@@ -2,7 +2,7 @@ const API_CONFIG = {
   providers: {
     openai: {
       baseUrl: 'https://api.openai.com/v1',
-      model: 'gpt-4o-mini',
+      model: 'gpt-6-astra',
       maxTokens: 4000,
     },
   },
