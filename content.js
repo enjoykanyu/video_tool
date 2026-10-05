@@ -75,8 +75,6 @@
       state.recordSelect,
       button('加载记录', '直接播放缓存，不调用模型', loadSelectedRecord),
       button('提取英文并翻译', '读取当前分P英文 CC 并翻译', extractOnline),
-      button('语音识别英文', '播放完整视频并从音频提取带时间轴的英文字幕', transcribeVideoAudio),
-      button('OCR提取硬字幕', '识别视频画面中已有的中英文硬字幕并生成 SRT', ocrVideoSubtitles),
       button('×', '关闭来源选择', () => { state.chooser.hidden = true; }, 'icon-button'),
       state.fileInput
     );
