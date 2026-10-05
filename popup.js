@@ -2,9 +2,7 @@
 document.addEventListener('DOMContentLoaded', async () => {
   const provider = document.getElementById('provider');
   const baseUrl = document.getElementById('baseUrl');
-  const asrBaseUrl = document.getElementById('asrBaseUrl');
   const apiKey = document.getElementById('apiKey');
-  const asrApiKey = document.getElementById('asrApiKey');
   const model = document.getElementById('model');
   const asrModel = document.getElementById('asrModel');
   const prompt = document.getElementById('prompt');
@@ -53,14 +51,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 加载保存的配置
   const result = await chrome.storage.local.get([
-    'apiKey', 'asrApiKey', 'baseUrl', 'asrBaseUrl', 'provider', 'model', 'asrModel', 'prompt', 'fontSize', 'position', 'backgroundOpacity', 'showAdjacentSubtitles'
+    'apiKey', 'baseUrl', 'provider', 'model', 'asrModel', 'prompt', 'fontSize', 'position', 'backgroundOpacity', 'showAdjacentSubtitles'
   ]);
   
   if (result.provider) provider.value = result.provider;
   if (result.baseUrl) baseUrl.value = result.baseUrl;
-  if (result.asrBaseUrl) asrBaseUrl.value = result.asrBaseUrl;
   if (result.apiKey) apiKey.value = result.apiKey;
-  if (result.asrApiKey) asrApiKey.value = result.asrApiKey;
   if (result.model) model.value = result.model;
   asrModel.value = result.asrModel && !/^qwen(?:3-asr-flash|audio-3\.0-asr-flash)$/i.test(result.asrModel) ? result.asrModel : 'qwen-audio-3.1-asr-flash-filetrans';
   if (result.prompt) prompt.value = result.prompt;
@@ -153,9 +149,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       await chrome.storage.local.set({
         apiKey: apiKey.value,
-        asrApiKey: asrApiKey.value,
         baseUrl: baseUrl.value,
-        asrBaseUrl: asrBaseUrl.value,
         provider: provider.value,
         model: model.value,
         asrModel: asrModel.value,
