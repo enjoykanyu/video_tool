@@ -2,11 +2,12 @@
   'use strict';
 
   const CACHE_PREFIX = 'subtitleCache:';
-  const PREVIOUS_LINES = 0;
+  const ADJACENT_FONT_SCALE = 0.75;
   const state = {
     bvid: '', page: 1, cacheBase: '', video: null, subtitles: [], generation: 0,
     currentIndex: -2, frame: 0, panel: null, body: null, status: null, chooser: null,
     recordSelect: null, fileInput: null, dragPosition: null, size: null, resourceUrls: [], ocrOverlay: null,
+    showAdjacentSubtitles: true,
   };
   const el = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -94,8 +95,13 @@
     new ResizeObserver(entries => {
       const rect = entries[0]?.contentRect;
       if (!rect || state.panel.classList.contains('ai-subtitle-hidden')) return;
-      state.size = { width: Math.round(rect.width), height: Math.round(rect.height) };
-      chrome.storage.local.set({ subtitleSize: state.size });
+      fitSubtitleText();
+      // Save the requested height, so automatic growth for adjacent cues can shrink again.
+      const size = { width: Math.round(state.panel.getBoundingClientRect().width), height: parseFloat(state.panel.style.height) || 116 };
+      if (size.width !== state.size?.width || size.height !== state.size?.height) {
+        state.size = size;
+        chrome.storage.local.set({ subtitleSize: size });
+      }
     }).observe(state.panel);
   }
 
@@ -482,8 +488,8 @@
     state.body.replaceChildren();
     if (center < 0) return state.panel.classList.add('ai-subtitle-no-cue');
     state.panel.classList.remove('ai-subtitle-no-cue', 'ai-subtitle-hidden');
-    // Keep the overlay focused: show only the active cue.
-    const start = Math.max(0, center - PREVIOUS_LINES), end = center;
+    const adjacent = state.showAdjacentSubtitles ? 1 : 0;
+    const start = Math.max(0, center - adjacent), end = Math.min(state.subtitles.length - 1, center + adjacent);
     for (let i = start; i <= end; i++) {
       const item = state.subtitles[i], line = el('div', `subtitle-line${i === center ? ' subtitle-current' : ''}`);
       line.append(el('div', 'subtitle-original', item.content || ''));
@@ -495,15 +501,29 @@
 
   function fitSubtitleText() {
     if (!state.body) return;
+    const current = state.body.querySelector('.subtitle-current');
+    if (!current) return;
     const available = Math.max(120, state.body.clientWidth - 28);
-    state.body.querySelectorAll('.subtitle-line').forEach(line => {
-      let size = Number(state.fontSize || 20);
+    const fitLine = (line, size, minimum) => {
+      line.style.whiteSpace = 'nowrap';
       line.style.fontSize = `${size}px`;
-      while (line.scrollWidth > available && size > 12) {
-        size -= 1;
+      while (line.scrollWidth > available && size > minimum) {
+        size = Math.max(minimum, size - 1);
         line.style.fontSize = `${size}px`;
       }
+      // Allow very long text and imported line breaks to wrap after fitting.
+      line.style.whiteSpace = 'pre-line';
+      return size;
+    };
+    const currentSize = fitLine(current, Number(state.fontSize || 20), 12);
+    const lines = [...state.body.querySelectorAll('.subtitle-line')];
+    lines.filter(line => line !== current).forEach(line => {
+      fitLine(line, currentSize * ADJACENT_FONT_SCALE, 12 * ADJACENT_FONT_SCALE);
     });
+    const bodyStyle = getComputedStyle(state.body);
+    const height = lines.reduce((total, line) => total + line.getBoundingClientRect().height, 0)
+      + parseFloat(bodyStyle.paddingTop) + parseFloat(bodyStyle.paddingBottom) + 2;
+    state.panel.style.minHeight = `${Math.max(116, Math.ceil(height))}px`;
   }
 
   function showChooser() { state.chooser.hidden = false; }
@@ -552,18 +572,22 @@
         state.backgroundOpacity = Math.max(0.2, Math.min(0.9, opacity));
         state.panel.style.setProperty('--ai-subtitle-bg-opacity', String(state.backgroundOpacity));
       }
+      if (typeof request.config?.showAdjacentSubtitles === 'boolean') {
+        state.showAdjacentSubtitles = request.config.showAdjacentSubtitles;
+      }
+      if (state.panel && !state.panel.classList.contains('ai-subtitle-hidden')) render(state.currentIndex);
       respond({ success: true });
     }
     return true;
   });
   async function loadPreferences() {
-    const stored = await chrome.storage.local.get(['subtitleCoordinates', 'subtitleSize', 'fontSize']);
+    const stored = await chrome.storage.local.get(['subtitleCoordinates', 'subtitleSize', 'fontSize', 'showAdjacentSubtitles']);
+    state.showAdjacentSubtitles = stored.showAdjacentSubtitles !== false;
     state.dragPosition = stored.subtitleCoordinates || null;
     const savedSize = stored.subtitleSize;
     state.size = savedSize ? {
       width: Math.max(Number(savedSize.width) || 0, Math.min(Math.round(innerWidth * 0.96), 1200)),
-      // Migrate the old tall panel to the compact two-line layout.
-      height: Math.min(Number(savedSize.height) || 124, 124),
+      height: Math.max(116, Number(savedSize.height) || 116),
     } : null;
     state.fontSize = Math.max(14, Math.min(40, Number(stored.fontSize || 20)));
     state.backgroundOpacity = Math.max(0.2, Math.min(0.9, Number(stored.backgroundOpacity || 0.55)));

@@ -10,6 +10,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const prompt = document.getElementById('prompt');
   const fontSize = document.getElementById('fontSize');
   const fontSizeValue = document.getElementById('fontSizeValue');
+  const showAdjacentSubtitles = document.getElementById('showAdjacentSubtitles');
   const position = document.getElementById('position');
   const backgroundOpacity = document.getElementById('backgroundOpacity');
   const backgroundOpacityValue = document.getElementById('backgroundOpacityValue');
@@ -52,7 +53,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 加载保存的配置
   const result = await chrome.storage.local.get([
-    'apiKey', 'asrApiKey', 'baseUrl', 'asrBaseUrl', 'provider', 'model', 'asrModel', 'prompt', 'fontSize', 'position', 'backgroundOpacity'
+    'apiKey', 'asrApiKey', 'baseUrl', 'asrBaseUrl', 'provider', 'model', 'asrModel', 'prompt', 'fontSize', 'position', 'backgroundOpacity', 'showAdjacentSubtitles'
   ]);
   
   if (result.provider) provider.value = result.provider;
@@ -64,6 +65,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   asrModel.value = result.asrModel && !/^qwen(?:3-asr-flash|audio-3\.0-asr-flash)$/i.test(result.asrModel) ? result.asrModel : 'qwen-audio-3.1-asr-flash-filetrans';
   if (result.prompt) prompt.value = result.prompt;
   if (result.fontSize) fontSize.value = String(Math.max(14, Math.min(40, Number(result.fontSize))));
+  showAdjacentSubtitles.checked = result.showAdjacentSubtitles !== false;
   if (result.position) position.value = result.position;
   if (result.backgroundOpacity) backgroundOpacity.value = String(Math.max(20, Math.min(90, Number(result.backgroundOpacity))));
   updateFontSizeLabel();
@@ -73,9 +75,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   fontSize.addEventListener('input', updateFontSizeLabel);
   backgroundOpacity.addEventListener('input', updateBackgroundOpacityLabel);
   model.addEventListener('input', updateSummaries);
+  showAdjacentSubtitles.addEventListener('change', updateSummaries);
 
   function updateFontSizeLabel() {
     fontSizeValue.textContent = `${fontSize.value}px`;
+    updateSummaries();
   }
 
   function updateBackgroundOpacityLabel() {
@@ -84,7 +88,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function updateSummaries() {
     modelSummary.textContent = model.value.trim() || '未设置';
-    fontSummary.textContent = `${fontSize.value}px`;
+    fontSummary.textContent = `${fontSize.value}px · ${showAdjacentSubtitles.checked ? '前后行开启' : '仅当前行'}`;
   }
   
   updateModelHint(provider.value);
@@ -157,6 +161,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         asrModel: asrModel.value,
         prompt: prompt.value,
         fontSize: fontSize.value,
+        showAdjacentSubtitles: showAdjacentSubtitles.checked,
         position: position.value,
         backgroundOpacity: backgroundOpacity.value
       });
@@ -168,6 +173,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           action: 'updateConfig',
           config: {
             fontSize: parseInt(fontSize.value),
+            showAdjacentSubtitles: showAdjacentSubtitles.checked,
             subtitlePosition: position.value,
             backgroundOpacity: parseInt(backgroundOpacity.value, 10) / 100
           }
@@ -175,6 +181,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       
       showStatus('✓ 设置已保存', 'success');
+      updateSummaries();
       closeModals();
     } catch (error) {
       showStatus('✗ 保存失败: ' + error.message, 'error');

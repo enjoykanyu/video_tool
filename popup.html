@@ -231,6 +231,13 @@
       text-align: center;
       font-variant-numeric: tabular-nums;
     }
+    input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin: 10px 0;
+      accent-color: #3b82f6;
+      cursor: pointer;
+    }
     .provider-info {
       font-size: 11px;
       color: #8e8994;
@@ -263,12 +270,12 @@
     <div class="quick-grid">
       <button class="quick-action" data-open-modal="apiModal"><span class="action-icon">⌘</span><strong>API 配置</strong><span>服务商、密钥与模型</span></button>
       <button class="quick-action" data-open-modal="translationModal"><span class="action-icon">文</span><strong>翻译提示词</strong><span>调整翻译语气与上下文</span></button>
-      <button class="quick-action" data-open-modal="displayModal"><span class="action-icon">◒</span><strong>显示效果</strong><span>字号、位置和透明度</span></button>
+      <button class="quick-action" data-open-modal="displayModal"><span class="action-icon">◒</span><strong>显示效果</strong><span>字号、前后行、位置和透明度</span></button>
       <button class="quick-action" id="testQuickBtn"><span class="action-icon">↗</span><strong>测试连接</strong><span>检查当前 API 是否可用</span></button>
     </div>
     <div class="summary-row">
       <div class="summary-pill">当前模型<b id="modelSummary">未设置</b></div>
-      <div class="summary-pill">字幕字号<b id="fontSummary">20px</b></div>
+      <div class="summary-pill">字幕显示<b id="fontSummary">20px · 前后行开启</b></div>
     </div>
   </div>
 
@@ -359,6 +366,12 @@
         <output id="fontSizeValue" class="range-value" for="fontSize">20px</output>
       </div>
       <div class="hint">拖动调节，当前行和中英文译文会按比例显示</div>
+    </div>
+
+    <div class="form-group">
+      <label for="showAdjacentSubtitles">显示前后行</label>
+      <input type="checkbox" id="showAdjacentSubtitles" role="switch" checked>
+      <div class="hint">显示前一行和后一行，字号为当前行的 75%；关闭后只显示当前行。保存后立即生效。</div>
     </div>
     
     <div class="form-group">
